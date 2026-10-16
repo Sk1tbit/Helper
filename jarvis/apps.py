@@ -56,12 +56,22 @@ SPOKEN_NAMES = {
 }
 
 
+def _stem(text: str) -> str:
+    """Грубо отрезает русские окончания: «телегу» -> «телег», «музыку» -> «музык»."""
+    return " ".join(re.sub(r"[аяуюеиыйоь]+$", "", w) if len(w) > 4 and re.search(r"[а-я]", w) else w
+                    for w in text.split())
+
+
+_SPOKEN_STEMS = {_stem(k): v for k, v in SPOKEN_NAMES.items()}
+
+
 def _variants(text: str) -> set[str]:
     n = _norm(text)
-    out = {n, _translit(n)}
-    for spoken, real in SPOKEN_NAMES.items():
-        if re.search(rf"(^| ){re.escape(spoken)}( |$)", n):
-            out.add(re.sub(rf"(^| ){re.escape(spoken)}( |$)", rf"\g<1>{real}\g<2>", n).strip())
+    stem = _stem(n)
+    out = {n, _translit(n), stem, _translit(stem)}
+    for spoken, real in _SPOKEN_STEMS.items():
+        if re.search(rf"(^| ){re.escape(spoken)}( |$)", stem):
+            out.add(re.sub(rf"(^| ){re.escape(spoken)}( |$)", rf"\g<1>{real}\g<2>", stem).strip())
     return out
 
 

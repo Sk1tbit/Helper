@@ -11,6 +11,7 @@ from typing import Callable
 from .config import Config
 from .learning import MEMORY_TOOLS, forget, memory_snapshot, remember, transcript
 from .llm import LLM, LLMError
+from .quick import quick_command
 from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError
 
 MAX_STEPS = 15          # максимум шагов (вызовов инструментов) на одну просьбу
@@ -131,6 +132,15 @@ class Brain:
             snapshot = memory_snapshot()
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
+
+        # Простые команды («открой телеграм», «громче») — сразу, без нейросети.
+        if self.cfg.quick_commands:
+            reply = quick_command(text, self.toolbox.run)
+            if reply:
+                self.messages.append({"role": "assistant", "content": reply, "tool_calls": []})
+                self.say(reply)
+                self.last_activity = time.time()
+                return
         try:
             self._loop(text)
         except LLMError as e:

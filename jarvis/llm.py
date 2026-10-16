@@ -62,8 +62,17 @@ class LLM:
         """Возвращает {"content": str, "tool_calls": [{"id", "name", "arguments"}]}."""
         model = model or self.cfg.model
         if self.backend == "ollama":
-            return self._chat_ollama(messages, tools, model)
-        return self._chat_openai(messages, tools, model)
+            reply = self._chat_ollama(messages, tools, model)
+        else:
+            reply = self._chat_openai(messages, tools, model)
+        if tools and not reply["tool_calls"] and reply["content"]:
+            # Сервер не распознал вызов, и модель написала его текстом — разберём сами.
+            names = {t["name"] for t in tools}
+            calls, rest = extract_text_tool_calls(reply["content"], names)
+            if calls:
+                print(f"[llm] вызов инструмента пришёл текстом, разобрал: {[c['name'] for c in calls]}")
+                reply = {"content": rest, "tool_calls": calls}
+        return reply
 
     def describe_image(self, image_b64: str, prompt: str) -> str:
         """Вопрос мультимодальной модели (vision_model) про картинку."""
@@ -245,3 +254,47 @@ class LLM:
 def _function_schema(tool: dict) -> dict:
     return {"type": "function", "function": {
         "name": tool["name"], "description": tool["description"], "parameters": tool["input_schema"]}}
+
+
+_TOOL_TAG_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.S)
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
+
+
+def extract_text_tool_calls(content: str, names: set[str]) -> tuple[list[dict], str]:
+    """Ищет вызовы инструментов, которые модель написала текстом.
+
+    Понимает форматы <tool_call>{...}</tool_call> (Qwen, Hermes), [TOOL_CALLS][...] (Mistral),
+    JSON в ```блоке``` и просто JSON-объект {"name": ..., "arguments": {...}}.
+    Принимает только инструменты из names. Возвращает (вызовы, текст без них)."""
+    chunks: list[str] = []
+    rest = content
+    for regex in (_TOOL_TAG_RE, _FENCE_RE):
+        found = regex.findall(rest)
+        if found:
+            chunks += found
+            rest = regex.sub("", rest)
+    if "[TOOL_CALLS]" in rest:
+        head, _, tail = rest.partition("[TOOL_CALLS]")
+        chunks.append(tail)
+        rest = head
+    stripped = rest.strip()
+    if not chunks and stripped.startswith(("{", "[")):
+        chunks.append(stripped)
+        rest = ""
+
+    calls: list[dict] = []
+    for chunk in chunks:
+        try:
+            data = json.loads(chunk.strip())
+        except ValueError:
+            continue
+        for item in data if isinstance(data, list) else [data]:
+            if not isinstance(item, dict):
+                continue
+            fn = item.get("function") if isinstance(item.get("function"), dict) else item
+            name = fn.get("name")
+            if name not in names:
+                continue
+            args = fn.get("arguments", fn.get("parameters", {}))
+            calls.append({"id": uuid.uuid4().hex[:12], "name": name, "arguments": _parse_args(args)})
+    return calls, (rest.strip() if calls else content)
