@@ -1,17 +1,21 @@
 @echo off
 cd /d "%~dp0"
 echo === Jarvis setup ===
+set PY=python
 python --version >nul 2>nul
+if errorlevel 1 set PY=py -3
+%PY% --version >nul 2>nul
 if errorlevel 1 (
-  echo [!] Python not found. Install Python 3.10-3.13 from https://www.python.org
+  echo [!] Python not found. Install Python 3.12 from https://www.python.org
   echo     and tick "Add python.exe to PATH" during install.
+  echo     Then open a NEW cmd window and run install.bat again.
   pause
   exit /b 1
 )
-python --version
+%PY% --version
 if not exist .venv (
   echo Creating virtual environment...
-  python -m venv .venv
+  %PY% -m venv .venv
   if errorlevel 1 (
     echo [!] Could not create .venv
     pause
