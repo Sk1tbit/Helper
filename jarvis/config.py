@@ -46,9 +46,7 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     cfg = Config()
     path = Path(path) if path else ROOT / "config.yaml"
     if path.exists():
-        import yaml
-
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = parse_simple_yaml(path.read_text(encoding="utf-8-sig"))
         known = {f.name for f in fields(Config)}
         for key, value in data.items():
             if key in known and value is not None:
@@ -56,3 +54,50 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
     cfg.wake_words = [w.lower() for w in cfg.wake_words]
     cfg.vision_model = cfg.vision_model or ""
     return cfg
+
+
+def parse_simple_yaml(text: str) -> dict:
+    """Читает плоский YAML вида `ключ: значение` — ровно то, что лежит в config.yaml.
+
+    Свой парсер вместо PyYAML: у того бывают не собраны пакеты под свежий Python.
+    Понимает комментарии, строки в кавычках, числа, true/false, null и списки [a, b].
+    """
+    data: dict = {}
+    for raw in text.splitlines():
+        line = _strip_comment(raw).strip()
+        if not line or ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = _parse_value(value.strip())
+    return data
+
+
+def _strip_comment(line: str) -> str:
+    quote = None
+    for i, ch in enumerate(line):
+        if ch in "\"'" and quote in (None, ch):
+            quote = None if quote else ch
+        elif ch == "#" and quote is None and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
+def _parse_value(value: str):
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        return [_parse_value(v.strip()) for v in inner.split(",") if v.strip()] if inner else []
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    low = value.lower()
+    if low in ("", "null", "~", "none"):
+        return None
+    if low in ("true", "yes", "on"):
+        return True
+    if low in ("false", "no", "off"):
+        return False
+    for cast in (int, float):
+        try:
+            return cast(value)
+        except ValueError:
+            pass
+    return value
