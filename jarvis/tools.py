@@ -12,6 +12,7 @@ import os
 import platform
 import re
 import subprocess
+import threading
 import time
 import webbrowser
 from datetime import datetime
@@ -228,6 +229,39 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "set_timer",
+        "description": "Ставит напоминание: через указанное время помощник скажет вслух текст. "
+        "Например «напомни через 15 минут покормить персонажа».",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "minutes": {"type": "number", "description": "Через сколько минут (можно дробное)"},
+                "text": {"type": "string", "description": "Что напомнить"},
+            },
+            "required": ["minutes", "text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_timers",
+        "description": "Показывает активные напоминания и сколько до них осталось.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "cancel_timers",
+        "description": "Отменяет напоминания: все или те, в тексте которых есть указанное слово.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Слово из напоминания; пусто — отменить все"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "save_screenshot",
+        "description": "Сохраняет скриншот экрана в полном качестве в папку «Изображения/Jarvis» (например, трофей в игре).",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "web_search",
         "description": "Ищет в интернете и возвращает краткие результаты. Для вопросов о фактах, новостях, погоде, курсах.",
         "input_schema": {
@@ -332,11 +366,16 @@ class ToolBox:
         confirm: Callable[[str], bool],
         confirm_dangerous: bool = True,
         vision: Callable[[str, str], str] | None = None,
+        notify: Callable[[str], None] | None = None,
     ):
         self.confirm = confirm
         self.confirm_dangerous = confirm_dangerous
         # vision(картинка_base64, вопрос) -> ответ мультимодальной модели.
         self.vision = vision
+        # notify(текст) — сказать что-то вслух вне разговора (напоминания).
+        self.notify = notify or print
+        self._timers: list[tuple[float, str, threading.Timer]] = []
+        self._timers_lock = threading.Lock()
         # Во сколько раз реальный экран больше отправленного скриншота.
         self.screen_scale = 1.0
 
@@ -486,6 +525,55 @@ class ToolBox:
         }[action]
         pyautogui.press(key, presses=max(1, min(times, 50)), interval=0.03)
         return f"{action} x{times}"
+
+    # --- напоминания и скриншоты ---------------------------------------------
+
+    def tool_set_timer(self, minutes: float, text: str) -> str:
+        minutes = float(minutes)
+        if not 0 < minutes <= 24 * 60:
+            raise ToolError("Время напоминания должно быть от нескольких секунд до суток")
+        fire_at = time.time() + minutes * 60
+
+        def fire() -> None:
+            with self._timers_lock:
+                self._timers = [t for t in self._timers if t[2] is not timer]
+            self.notify(f"Напоминаю: {text}")
+
+        timer = threading.Timer(minutes * 60, fire)
+        timer.daemon = True
+        timer.start()
+        with self._timers_lock:
+            self._timers.append((fire_at, text, timer))
+        return f"Напоминание через {_human_minutes(minutes)}: {text}"
+
+    def tool_list_timers(self) -> str:
+        with self._timers_lock:
+            timers = sorted(self._timers, key=lambda t: t[0])
+        if not timers:
+            return "Напоминаний нет"
+        now = time.time()
+        return "\n".join(f"через {_human_minutes((at - now) / 60)}: {text}" for at, text, _ in timers)
+
+    def tool_cancel_timers(self, text: str = "") -> str:
+        needle = text.strip().lower()
+        with self._timers_lock:
+            hit = [t for t in self._timers if needle in t[1].lower()]
+            for _, _, timer in hit:
+                timer.cancel()
+            self._timers = [t for t in self._timers if t not in hit]
+        return f"Отменено напоминаний: {len(hit)}" if hit else "Таких напоминаний нет"
+
+    def tool_save_screenshot(self) -> str:
+        import mss
+        import mss.tools
+
+        folder = Path.home() / "Pictures" / "Jarvis"
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"screen_{datetime.now():%Y-%m-%d_%H-%M-%S}.png"
+        with mss.mss() as sct:
+            shot = sct.grab(sct.monitors[1])
+            mss.tools.to_png(shot.rgb, shot.size, output=str(path))
+        return f"Скриншот сохранён: {path}"
 
     def tool_web_search(self, query: str) -> str:
         try:
@@ -650,3 +738,17 @@ def _windows_module():
 
     return pygetwindow
 
+
+
+def _human_minutes(minutes: float) -> str:
+    total = max(0, round(minutes * 60))
+    h, rest = divmod(total, 3600)
+    m, sec = divmod(rest, 60)
+    parts = []
+    if h:
+        parts.append(f"{h} ч")
+    if m:
+        parts.append(f"{m} мин")
+    if sec and not h:
+        parts.append(f"{sec} сек")
+    return " ".join(parts) or "0 сек"

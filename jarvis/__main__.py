@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import threading
 
 from .config import load_config
 
@@ -12,6 +13,8 @@ YES_WORDS = ("да", "давай", "подтверждаю", "выполняй",
 STOP_WORDS = ("стоп", "хватит", "отбой", "спасибо", "ничего", "отмена")
 EXIT_PHRASES = ("отключись", "выключись", "завершить работу", "заверши работу")
 RESET_PHRASES = ("новый разговор", "забудь всё", "забудь все", "начнём сначала", "начнем сначала")
+GAME_ON_RE = re.compile(r"\b(игровой режим|режим игры|включи игровой режим|игровой режим включи)\b")
+GAME_OFF_RE = re.compile(r"\b(обычный режим|выключи игровой режим|игровой режим выключи|выйди из игрового режима)\b")
 
 
 def is_yes(text: str | None) -> bool:
@@ -30,13 +33,16 @@ def run_voice(cfg) -> None:
     listener = Listener(cfg)
     speaker = Speaker(cfg)
 
+    speak_lock = threading.Lock()  # напоминания приходят из других потоков — не говорим хором
+
     def say(text: str) -> None:
-        print(f"{cfg.assistant_name}: {text}")
-        listener.mute()
-        try:
-            speaker.say(text)
-        finally:
-            listener.unmute()
+        with speak_lock:
+            print(f"{cfg.assistant_name}: {text}")
+            listener.mute()
+            try:
+                speaker.say(text)
+            finally:
+                listener.unmute()
 
     def confirm(question: str) -> bool:
         say(question + " Скажите да или нет.")
@@ -106,6 +112,12 @@ def _handle_local(command: str, brain, say) -> bool:
         brain.reset()
         say("Начинаем с чистого листа.")
         return True
+    if GAME_OFF_RE.search(low):
+        say(brain.set_game_mode(False))
+        return True
+    if GAME_ON_RE.search(low):
+        say(brain.set_game_mode(True))
+        return True
     return False
 
 
@@ -118,7 +130,10 @@ def run_text(cfg) -> None:
     def confirm(question: str) -> bool:
         return is_yes(input(f"{cfg.assistant_name}: {question} [да/нет] > "))
 
-    brain = Brain(cfg, say=say, confirm=confirm)
+    def notify(text: str) -> None:
+        print(f"\n{cfg.assistant_name}: {text}\nВы: ", end="", flush=True)
+
+    brain = Brain(cfg, say=say, confirm=confirm, notify=notify)
     problem = brain.check()
     if problem:
         print(f"[!] {problem}")

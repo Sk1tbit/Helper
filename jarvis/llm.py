@@ -24,9 +24,11 @@ from .config import Config
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, spoken: str = "Нейросеть вернула ошибку, попробуйте ещё раз."):
+    def __init__(self, message: str, spoken: str = "Нейросеть вернула ошибку, попробуйте ещё раз.",
+                 status: int | None = None):
         super().__init__(message)
         self.spoken = spoken  # что сказать вслух
+        self.status = status  # HTTP-код ответа сервера, если был
 
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
@@ -53,6 +55,7 @@ class LLM:
         self.backend = cfg.llm_backend
         self.url = cfg.llm_url.rstrip("/")
         self.session = requests.Session()
+        self._no_think_ok: bool | None = None  # None — ещё не проверяли
         if cfg.llm_api_key:
             self.session.headers["Authorization"] = f"Bearer {cfg.llm_api_key}"
 
@@ -183,7 +186,7 @@ class LLM:
                 "options": self._options(), "keep_alive": self.cfg.keep_alive}
         if tools:
             body["tools"] = [_function_schema(t) for t in tools]
-        msg = self._post("/api/chat", body).get("message", {})
+        msg = self._post_no_think("/api/chat", body, {"think": False}).get("message", {})
         calls = [
             {"id": uuid.uuid4().hex[:12], "name": c["function"]["name"],
              "arguments": _parse_args(c["function"].get("arguments"))}
@@ -212,7 +215,9 @@ class LLM:
         body: dict[str, Any] = {"model": model, "messages": wire, "temperature": self.cfg.temperature}
         if tools:
             body["tools"] = [_function_schema(t) for t in tools]
-        msg = self._post("/v1/chat/completions", body)["choices"][0]["message"]
+        # Qwen3/3.5 и похожие: просим не «размышлять» перед ответом — так в разы быстрее.
+        no_think = {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
+        msg = self._post_no_think("/v1/chat/completions", body, no_think)["choices"][0]["message"]
         calls = [
             {"id": c.get("id") or uuid.uuid4().hex[:12], "name": c["function"]["name"],
              "arguments": _parse_args(c["function"].get("arguments"))}
@@ -221,6 +226,21 @@ class LLM:
         return {"content": _clean(msg.get("content")), "tool_calls": calls}
 
     # --- общее --------------------------------------------------------------
+
+    def _post_no_think(self, path: str, body: dict, extra: dict) -> dict:
+        """POST с просьбой выключить размышления; если сервер такие поля не понимает — без них."""
+        if not self.cfg.disable_thinking or self._no_think_ok is False:
+            return self._post(path, body)
+        try:
+            data = self._post(path, {**body, **extra})
+            self._no_think_ok = True
+            return data
+        except LLMError as e:
+            if self._no_think_ok or e.status not in (400, 422):
+                raise
+            print(f"[llm] сервер не принял отключение размышлений ({e}); работаю без этого")
+            self._no_think_ok = False
+            return self._post(path, body)
 
     def _post(self, path: str, body: dict) -> dict:
         try:
@@ -239,15 +259,15 @@ class LLM:
                 detail = detail.get("message", detail)
             detail = str(detail)[:300]
             if "does not support tools" in detail:
-                raise LLMError(detail, "Эта модель не умеет управлять компьютером. Выберите модель с поддержкой инструментов.")
+                raise LLMError(detail, "Эта модель не умеет управлять компьютером. Выберите модель с поддержкой инструментов.", r.status_code)
             low = detail.lower()
             if "model" in low and ("not found" in low or "not loaded" in low or "no models" in low):
                 if self.backend == "ollama":
-                    raise LLMError(detail, "Модель не найдена. Скачайте её командой ollama pull.")
+                    raise LLMError(detail, "Модель не найдена. Скачайте её командой ollama pull.", r.status_code)
                 print("[!] Модель не загружена на сервере. В LM Studio: вкладка Developer → загрузи модель "
                       "и скопируй её API identifier в config.yaml (строки model и vision_model).")
-                raise LLMError(detail, "Модель не загружена в LM Studio. Загрузите её во вкладке Developer.")
-            raise LLMError(f"Ошибка нейросети ({r.status_code}): {detail}")
+                raise LLMError(detail, "Модель не загружена в LM Studio. Загрузите её во вкладке Developer.", r.status_code)
+            raise LLMError(f"Ошибка нейросети ({r.status_code}): {detail}", status=r.status_code)
         return r.json()
 
 

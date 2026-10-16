@@ -21,7 +21,60 @@ MEDIA_COMMANDS: list[tuple[str, str, dict, str]] = [
     (r"(предыдущ\w*|назад)( трек| песню| песня| видео)?", "media", {"action": "previous", "times": 1}, "Предыдущий."),
     (r"сверни (все|всё)( окна)?|покажи рабочий стол", "press_keys", {"keys": ["win", "d"]}, "Свернул."),
     (r"заблокируй (комп|компьютер|экран|пк)", "power", {"action": "lock"}, "Блокирую."),
+    (r"(сделай |сохрани )?(скрин|скриншот|снимок экрана)( сохрани| сделай)?|сохрани (экран|трофей)", "save_screenshot", {}, "Скриншот сохранён."),
+    (r"(отмени|удали|сбрось) (все )?(напоминания|напоминание|таймеры|таймер)", "cancel_timers", {"text": ""}, "Напоминания отменены."),
 ]
+
+NUMBERS = {
+    "ноль": 0, "один": 1, "одну": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4, "пять": 5,
+    "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10, "одиннадцать": 11, "двенадцать": 12,
+    "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15, "шестнадцать": 16, "семнадцать": 17,
+    "восемнадцать": 18, "девятнадцать": 19, "двадцать": 20, "тридцать": 30, "сорок": 40,
+    "пятьдесят": 50, "шестьдесят": 60, "семьдесят": 70, "восемьдесят": 80, "девяносто": 90, "сто": 100,
+}
+UNITS = {"секунд": 1 / 60, "минут": 1, "час": 60}
+# «через пятнадцать минут», «через 2 часа», «через полчаса», «через минуту»
+TIMER_RE = re.compile(
+    r"^(?:напомни|напомнить|поставь (?:таймер|напоминание))(?: мне)?(?: через| на)? ?(?P<amount>.*?) ?"
+    r"(?P<unit>секунд\w*|минут\w*|час\w*|полчаса|полтора часа)"
+    r"(?:\s+(?:что(?:бы)?|чтоб|о том что|про)(?=\s))?\s*(?P<text>.*)$"
+)
+
+
+def parse_amount(words: str) -> float | None:
+    """«двадцать пять» -> 25, «2» -> 2, «» -> 1 («через минуту»), «полторы» -> 1.5."""
+    words = words.strip()
+    if not words:
+        return 1
+    if re.fullmatch(r"\d+([.,]\d+)?", words):
+        return float(words.replace(",", "."))
+    if words in ("полторы", "полтора"):
+        return 1.5
+    total = 0
+    for w in words.split():
+        if w not in NUMBERS:
+            return None
+        total += NUMBERS[w]
+    return total
+
+
+def parse_timer(t: str) -> tuple[float, str] | None:
+    m = TIMER_RE.match(t)
+    if not m:
+        return None
+    unit = m.group("unit")
+    if unit == "полчаса":
+        minutes = 30.0
+    elif unit == "полтора часа":
+        minutes = 90.0
+    else:
+        amount = parse_amount(m.group("amount"))
+        if amount is None:
+            return None
+        key = next(k for k in UNITS if unit.startswith(k))
+        minutes = amount * UNITS[key]
+    text = m.group("text").strip() or "время вышло"
+    return minutes, text
 
 OPEN_RE = re.compile(r"^(открой|откройте|запусти|запустите)\s+(.+)$")
 FILLER_RE = re.compile(r"\b(пожалуйста|мне|программу|приложение|прогу)\b")
@@ -50,6 +103,16 @@ def quick_command(text: str, run_tool: Callable[[str, dict], str]) -> str | None
                 print(f"[quick] не вышло: {e}")
                 return None
             return reply
+
+    timer = parse_timer(t)
+    if timer:
+        minutes, what = timer
+        print(f"[quick] set_timer {minutes} мин: {what}")
+        try:
+            return run_tool("set_timer", {"minutes": minutes, "text": what}).replace("Напоминание", "Напомню", 1)
+        except Exception as e:
+            print(f"[quick] не вышло: {e}")
+            return None
 
     m = OPEN_RE.match(t)
     if not m:

@@ -36,6 +36,10 @@ class Config:
     idle_reset_minutes: float = 10
     learning: bool = True
     quick_commands: bool = True
+    disable_thinking: bool = True
+    game_name: str = ""
+    game_model: str = ""
+    game_vision_model: str = ""
 
     @property
     def vosk_model_path(self) -> Path:

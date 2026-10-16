@@ -58,6 +58,13 @@ SYSTEM_PROMPT = """Ты — {name}, голосовой помощник в ст�
 или придумывает свою команду. Вызывай forget, если факт устарел или неверен.
 - Не сохраняй пароли, ключи и коды. Про память говори максимум "запомнил"."""
 
+GAME_NOTE = """
+
+Сейчас включён игровой режим: пользователь играет{game}. Отвечай предельно коротко, в одну фразу. \
+Не смотри на экран и не нажимай клавиши, пока тебя прямо не попросили, — не мешай игре. \
+Не управляй игрой за пользователя и не автоматизируй игровые действия (в онлайн-играх за это банят): \
+помогай советом, поиском информации, напоминаниями, скриншотами, музыкой и звуком."""
+
 REFLECT_SYSTEM = """Ты — модуль самообучения голосового помощника {name}. Ты разбираешь \
 законченный разговор и обновляешь память помощника инструментами remember и forget, \
 чтобы в следующий раз он лучше подстроился под пользователя."""
@@ -85,12 +92,21 @@ REFLECT_PROMPT = """Вот память помощника и запись то�
 
 
 class Brain:
-    def __init__(self, cfg: Config, say: Callable[[str], None], confirm: Callable[[str], bool]):
+    def __init__(
+        self,
+        cfg: Config,
+        say: Callable[[str], None],
+        confirm: Callable[[str], bool],
+        notify: Callable[[str], None] | None = None,
+    ):
         self.cfg = cfg
         self.say = say
         self.llm = LLM(cfg)
         vision = self.llm.describe_image if cfg.vision_model else None
-        self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous, vision=vision)
+        self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous,
+                               vision=vision, notify=notify or say)
+        self.game_mode = False
+        self._normal_models = (cfg.model, cfg.vision_model)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)
         tools = TOOLS if vision else [t for t in TOOLS if t["name"] not in VISION_TOOLS]
         self.tools = tools + MEMORY_TOOLS
@@ -100,6 +116,27 @@ class Brain:
 
     def check(self) -> str | None:
         return self.llm.check()
+
+    def set_game_mode(self, on: bool) -> str:
+        """Игровой режим: короткие ответы, не лезть в игру; по желанию — лёгкая модель (game_model)."""
+        if on == self.game_mode:
+            return "Игровой режим уже включён." if on else "Игровой режим и так выключен."
+        self.game_mode = on
+        self.reset()
+        if on and self.cfg.game_model:
+            self.cfg.model = self.cfg.game_model
+            self.cfg.vision_model = self.cfg.game_vision_model
+        elif not on:
+            self.cfg.model, self.cfg.vision_model = self._normal_models
+        if self.cfg.game_model:
+            print(f"[brain] модель: {self.cfg.model}, зрение: {self.cfg.vision_model or 'выключено'}")
+        return "Игровой режим включён. Удачной игры." if on else "Игровой режим выключен."
+
+    def _system_prompt(self) -> str:
+        if not self.game_mode:
+            return self.system
+        game = f" в {self.cfg.game_name}" if self.cfg.game_name else ""
+        return self.system + GAME_NOTE.format(game=game)
 
     def reset(self, learn: bool = True) -> None:
         """Начинает новый разговор; старый (если был) отдаётся на разбор в фоне."""
@@ -153,7 +190,7 @@ class Brain:
         used_tools = False
         nudged = False
         for _ in range(MAX_STEPS):
-            reply = self.llm.chat([{"role": "system", "content": self.system}] + self.messages, self.tools)
+            reply = self.llm.chat([{"role": "system", "content": self._system_prompt()}] + self.messages, self.tools)
             self.messages.append({"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]})
             if not reply["tool_calls"]:
                 if not used_tools and not nudged and ACTION_RE.search(request):
