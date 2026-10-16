@@ -47,6 +47,9 @@ APP_ALIASES = {
         "терминал": "wt",
         "powershell": "powershell",
         "браузер": "https://www.google.com",
+        "яндекс": r"%LOCALAPPDATA%\Yandex\YandexBrowser\Application\browser.exe",
+        "яндекс браузер": r"%LOCALAPPDATA%\Yandex\YandexBrowser\Application\browser.exe",
+        "yandex": r"%LOCALAPPDATA%\Yandex\YandexBrowser\Application\browser.exe",
         "хром": "chrome",
         "chrome": "chrome",
         "edge": "msedge",
@@ -72,8 +75,9 @@ APP_ALIASES = {
 TOOLS: list[dict[str, Any]] = [
     {
         "name": "open_app",
-        "description": "Запускает программу или открывает файл/папку по имени или пути. "
-        "Понимает частые названия по-русски (блокнот, калькулятор, телеграм, стим...).",
+        "description": "Запускает программу или открывает файл/папку. Передавай название так, как его "
+        "сказал пользователь (например «яндекс браузер», «телеграм», «фотошоп») — программа сама найдёт "
+        "её в меню Пуск и на рабочем столе. Если не нашлось, вернёт похожие программы — выбери из них.",
         "input_schema": {
             "type": "object",
             "properties": {"name": {"type": "string", "description": "Название программы, путь к файлу или папке"}},
@@ -306,15 +310,24 @@ class ToolBox:
     # --- запуск и браузер ----------------------------------------------------
 
     def tool_open_app(self, name: str) -> str:
-        target = APP_ALIASES.get(SYSTEM, {}).get(name.strip().lower(), name.strip())
+        name = name.strip()
+        target = APP_ALIASES.get(SYSTEM, {}).get(name.lower(), name)
         if target.startswith(("http://", "https://")):
             webbrowser.open(target)
         elif SYSTEM == "Windows":
+            from . import apps
+
+            # Алиас может указывать на путь, которого на этом компе нет — тогда ищем по названию.
+            if "%" in target and not Path(os.path.expandvars(target)).exists():
+                target = name
             try:
-                os.startfile(target)  # type: ignore[attr-defined]
-            except OSError:
-                # `start` находит программы из "App Paths" (chrome, winword...), которых нет в PATH.
-                subprocess.Popen(f'start "" "{target}"', shell=True)
+                launched = apps.launch_windows(target) or (target != name and apps.launch_windows(name))
+            except OSError as e:
+                raise ToolError(f"Не получилось запустить {name}: {e}")
+            if not launched:
+                similar = ", ".join(apps.suggestions(name)) or "ничего похожего"
+                raise ToolError(f"Программа «{name}» не найдена. Похожие в меню Пуск: {similar}")
+            return f"Запущено: {launched}"
         elif SYSTEM == "Darwin":
             path = Path(target).expanduser()
             subprocess.Popen(["open", str(path)] if path.exists() else ["open", "-a", target])
