@@ -82,21 +82,58 @@ class LLM:
         return _clean(data["choices"][0]["message"].get("content"))
 
     def check(self) -> str | None:
-        """Проверка, что сервер жив и модель есть. Возвращает текст проблемы или None."""
-        try:
-            if self.backend == "ollama":
-                tags = self.session.get(f"{self.url}/api/tags", timeout=5).json()
-                names = {m["name"] for m in tags.get("models", [])}
+        """Проверка, что сервер жив и модели есть. Возвращает текст проблемы или None.
+
+        Заодно сама разбирается, Ollama перед ней или OpenAI-совместимый сервер (LM Studio):
+        если в конфиге перепутано, переключается и пишет об этом в консоль."""
+        if self.backend == "ollama":
+            names = self._ollama_models()
+            if names is None:
+                # Может, это LM Studio: по указанному адресу или по стандартному.
+                for url in dict.fromkeys([self.url, "http://localhost:1234"]):
+                    if self._openai_models(url) is not None:
+                        print(f"[i] По адресу {url} не Ollama, а OpenAI-совместимый сервер (LM Studio?). "
+                              f"Переключаюсь. Чтобы не видеть это сообщение, поставь в config.yaml: "
+                              f"llm_backend: openai и llm_url: {url}")
+                        self.backend, self.url = "openai", url
+                        break
+                else:
+                    return f"Не могу подключиться к нейросети по адресу {self.url}. Ollama или LM Studio запущены?"
+            else:
                 for model in filter(None, [self.cfg.model, self.cfg.vision_model]):
                     if model not in names and f"{model}:latest" not in names:
                         return f"В Ollama нет модели {model}. Скачай её: ollama pull {model}"
-            else:
-                self.session.get(f"{self.url}/v1/models", timeout=5).raise_for_status()
-        except requests.ConnectionError:
-            return f"Не могу подключиться к {self.url}. Нейросеть запущена?"
-        except (requests.RequestException, ValueError) as e:
-            return f"Сервер нейросети ответил странно: {e}"
+                return None
+
+        ids = self._openai_models(self.url)
+        if ids is None:
+            return f"Не могу подключиться к {self.url}. В LM Studio включён сервер (вкладка Developer → Start Server)?"
+        chat_ids = [i for i in ids if "embed" not in i.lower()]
+        for model in filter(None, [self.cfg.model, self.cfg.vision_model]):
+            if ids and model not in ids:
+                listed = ", ".join(chat_ids) or "пусто"
+                return f"На сервере нет модели «{model}». Впиши в config.yaml одну из этих: {listed}"
         return None
+
+    def _ollama_models(self) -> set[str] | None:
+        try:
+            data = self.session.get(f"{self.url}/api/tags", timeout=5).json()
+        except (requests.RequestException, ValueError):
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+            return None
+        return {m.get("name", "") for m in data["models"]}
+
+    def _openai_models(self, url: str) -> list[str] | None:
+        try:
+            r = self.session.get(f"{url.rstrip('/')}/v1/models", timeout=5)
+            r.raise_for_status()
+            data = r.json()
+        except (requests.RequestException, ValueError):
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            return None
+        return [m.get("id", "") for m in data["data"]]
 
     # --- Ollama -------------------------------------------------------------
 
