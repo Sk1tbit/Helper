@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import platform
 import re
 import tempfile
 import time
@@ -41,19 +42,11 @@ class Speaker:
 
     def _say_edge(self, text: str) -> None:
         import edge_tts
-        import pygame
 
         rate = f"{int(self.cfg.tts_rate):+d}%"
         communicate = edge_tts.Communicate(text, self.cfg.edge_voice, rate=rate)
         asyncio.run(communicate.save(str(self._tmp)))
-
-        if not pygame.mixer.get_init():
-            pygame.mixer.init()
-        pygame.mixer.music.load(str(self._tmp))
-        pygame.mixer.music.play()
-        while pygame.mixer.music.get_busy():
-            time.sleep(0.05)
-        pygame.mixer.music.unload()
+        _play_mp3(self._tmp)
 
     def _say_sapi(self, text: str) -> None:
         import pyttsx3
@@ -70,3 +63,33 @@ class Speaker:
         engine.say(text)
         engine.runAndWait()
         engine.stop()
+
+
+def _play_mp3(path: Path) -> None:
+    """Проигрывает mp3 и ждёт окончания."""
+    if platform.system() == "Windows":
+        # Встроенный в Windows MCI — не нужен pygame, который не всегда ставится на свежий Python.
+        import ctypes
+
+        mci = ctypes.windll.winmm.mciSendStringW
+        buf = ctypes.create_unicode_buffer(256)
+        mci("close jarvis_tts", None, 0, None)
+        err = mci(f'open "{path}" type mpegvideo alias jarvis_tts', None, 0, None)
+        if err:
+            ctypes.windll.winmm.mciGetErrorStringW(err, buf, 256)
+            raise RuntimeError(f"MCI: {buf.value}")
+        try:
+            mci("play jarvis_tts wait", None, 0, None)
+        finally:
+            mci("close jarvis_tts", None, 0, None)
+        return
+
+    import pygame
+
+    if not pygame.mixer.get_init():
+        pygame.mixer.init()
+    pygame.mixer.music.load(str(path))
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        time.sleep(0.05)
+    pygame.mixer.music.unload()
