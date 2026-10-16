@@ -84,36 +84,52 @@ class LLM:
     def check(self) -> str | None:
         """Проверка, что сервер жив и модели есть. Возвращает текст проблемы или None.
 
-        Заодно сама разбирается, Ollama перед ней или OpenAI-совместимый сервер (LM Studio):
-        если в конфиге перепутано, переключается и пишет об этом в консоль."""
-        if self.backend == "ollama":
-            names = self._ollama_models()
-            if names is None:
-                # Может, это LM Studio: по указанному адресу или по стандартному.
-                for url in dict.fromkeys([self.url, "http://localhost:1234"]):
-                    if self._openai_models(url) is not None:
-                        print(f"[i] По адресу {url} не Ollama, а OpenAI-совместимый сервер (LM Studio?). "
-                              f"Переключаюсь. Чтобы не видеть это сообщение, поставь в config.yaml: "
-                              f"llm_backend: openai и llm_url: {url}")
-                        self.backend, self.url = "openai", url
-                        break
-                else:
-                    return f"Не могу подключиться к нейросети по адресу {self.url}. Ollama или LM Studio запущены?"
-            else:
-                for model in filter(None, [self.cfg.model, self.cfg.vision_model]):
-                    if model not in names and f"{model}:latest" not in names:
-                        return f"В Ollama нет модели {model}. Скачай её: ollama pull {model}"
-                return None
+        Если в конфиге перепутан тип сервера или адрес (например, указан порт Ollama, а модель
+        загружена в LM Studio), ищет модель на стандартных адресах и переключается туда."""
+        wanted = [m for m in (self.cfg.model, self.cfg.vision_model) if m]
+        urls = [self.url] + [u for u in ("http://localhost:1234", "http://localhost:11434") if u != self.url]
+        found_servers: list[tuple[str, str, list[str]]] = []
+        for url in urls:
+            # Сначала спрашиваем как Ollama: её /api/tags отличает Ollama от LM Studio
+            # (Ollama тоже отвечает на /v1/models, и по нему их не различить).
+            for kind in ("ollama", "openai"):
+                models = self._list_models(kind, url)
+                if models is None:
+                    continue
+                found_servers.append((kind, url, models))
+                if all(self._has(kind, models, m) for m in wanted):
+                    if (kind, url) != (self.backend, self.url):
+                        name = "LM Studio" if kind == "openai" else "Ollama"
+                        print(f"[i] Нужная модель нашлась в {name} по адресу {url} — подключаюсь туда. "
+                              f"Чтобы не видеть это сообщение, поставь в config.yaml: "
+                              f"llm_backend: {kind} и llm_url: {url}")
+                        self.backend, self.url = kind, url
+                    return None
+                break  # сервер ответил, но модели нет — смотрим следующий адрес
+        if not found_servers:
+            return (f"Не могу подключиться к нейросети ({self.url}). Запусти LM Studio и включи сервер "
+                    f"(вкладка Developer → Start Server) или запусти Ollama.")
+        missing = ", ".join(wanted)
+        listing = "; ".join(
+            f"{'LM Studio' if k == 'openai' else 'Ollama'} ({u}): "
+            + (", ".join(m for m in ms if "embed" not in m.lower()) or "моделей нет")
+            for k, u, ms in found_servers
+        )
+        return f"Не нашёл модель {missing}. Что есть: {listing}. Впиши нужное имя в config.yaml (model и vision_model)."
 
-        ids = self._openai_models(self.url)
-        if ids is None:
-            return f"Не могу подключиться к {self.url}. В LM Studio включён сервер (вкладка Developer → Start Server)?"
-        chat_ids = [i for i in ids if "embed" not in i.lower()]
-        for model in filter(None, [self.cfg.model, self.cfg.vision_model]):
-            if ids and model not in ids:
-                listed = ", ".join(chat_ids) or "пусто"
-                return f"На сервере нет модели «{model}». Впиши в config.yaml одну из этих: {listed}"
-        return None
+    def _list_models(self, kind: str, url: str) -> list[str] | None:
+        if kind == "ollama":
+            saved, self.url = self.url, url
+            try:
+                names = self._ollama_models()
+            finally:
+                self.url = saved
+            return sorted(names) if names is not None else None
+        return self._openai_models(url)
+
+    @staticmethod
+    def _has(kind: str, models: list[str], model: str) -> bool:
+        return model in models or (kind == "ollama" and f"{model}:latest" in models)
 
     def _ollama_models(self) -> set[str] | None:
         try:
