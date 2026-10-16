@@ -105,6 +105,8 @@ class Brain:
         vision = self.llm.describe_image if cfg.vision_model else None
         self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous,
                                vision=vision, notify=notify or say)
+        self.toolbox.fishing_channels = list(cfg.fishing_tg_channels or [])
+        self.toolbox.open_tg_in_app = cfg.open_tg_in_app
         self.game_mode = False
         self._normal_models = (cfg.model, cfg.vision_model)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)
@@ -170,6 +172,11 @@ class Brain:
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
 
+        # «вьюнок перловица» — поиск точки в РР4 без надежды на то, что модель сама вызовет инструмент.
+        if self.cfg.quick_commands and self._quick_fishing(text):
+            self.last_activity = time.time()
+            return
+
         # Простые команды («открой телеграм», «громче») — сразу, без нейросети.
         if self.cfg.quick_commands:
             reply = quick_command(text, self.toolbox.run)
@@ -185,6 +192,42 @@ class Brain:
             self.reset(learn=False)
             self.say(e.spoken)
         self.last_activity = time.time()
+
+    def _quick_fishing(self, text: str) -> bool:
+        from .fishing import parse_request
+
+        parsed = parse_request(text)
+        if not parsed:
+            return False
+        target, water = parsed
+        self.say(f"Ищу {target}, {water}.")
+        report = self._run_tool("find_fishing_spot", {"target": target, "water": water, "open_link": True})
+        print(report)
+        if report.startswith("Ошибка"):
+            reply = "Поиск в интернете сейчас недоступен." if "недоступен" in report else "Не получилось поискать."
+            self.messages.append({"role": "assistant", "content": reply, "tool_calls": []})
+            self.say(reply)
+            return True
+        # Пересказ для голоса делает нейросеть, но без инструментов — с этим справится любая модель.
+        try:
+            reply = self.llm.chat([
+                {"role": "system", "content": "Ты голосовой помощник. По результатам поиска скажи в 1–2 коротких "
+                 "предложениях по-русски: координаты точки и на что ловить. Если данных нет — так и скажи. "
+                 "Без ссылок и markdown."},
+                {"role": "user", "content": report},
+            ])["content"]
+        except LLMError as e:
+            print(f"[brain] пересказ не удался: {e}")
+            reply = ""
+        if not reply:
+            from .fishing import COORD_RE
+            coords = sorted(set(f"{x}:{y}" for x, y in COORD_RE.findall(report)))[:3]
+            reply = (f"Нашёл. Координаты: {', '.join(coords)}." if coords else "Нашёл пост, открыл его.") \
+                if "Открыл" in report else "Ничего толкового не нашёл."
+        # В историю — короткий итог, чтобы можно было переспросить («а на что ловить?»).
+        self.messages.append({"role": "assistant", "content": f"{reply}\n[Найдено]\n{report[:1500]}", "tool_calls": []})
+        self.say(reply)
+        return True
 
     def _loop(self, request: str) -> None:
         used_tools = False

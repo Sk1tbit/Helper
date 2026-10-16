@@ -40,6 +40,8 @@ class Config:
     game_name: str = ""
     game_model: str = ""
     game_vision_model: str = ""
+    fishing_tg_channels: list[str] = field(default_factory=list)
+    open_tg_in_app: bool = False
 
     @property
     def vosk_model_path(self) -> Path:

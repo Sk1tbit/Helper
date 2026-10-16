@@ -229,6 +229,22 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "find_fishing_spot",
+        "description": "Русская Рыбалка 4: ищет посты и сайты (Telegram, ВК, форумы) про то, где и на что ловить "
+        "указанную рыбу (или добывать наживку) на водоёме, вытаскивает координаты и фразы про наживку "
+        "и открывает лучший пост в браузере. Используй, когда спрашивают про точки, клёв, наживку в РР4.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Рыба или наживка, например «перловица», «карп»"},
+                "water": {"type": "string", "description": "Водоём, например «Река Вьюнок»"},
+                "open_link": {"type": "boolean", "description": "Открыть лучший найденный пост (по умолчанию да)"},
+            },
+            "required": ["target", "water"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "set_timer",
         "description": "Ставит напоминание: через указанное время помощник скажет вслух текст. "
         "Например «напомни через 15 минут покормить персонажа».",
@@ -376,6 +392,8 @@ class ToolBox:
         self.notify = notify or print
         self._timers: list[tuple[float, str, threading.Timer]] = []
         self._timers_lock = threading.Lock()
+        self.fishing_channels: list[str] = []
+        self.open_tg_in_app = False
         # Во сколько раз реальный экран больше отправленного скриншота.
         self.screen_scale = 1.0
 
@@ -525,6 +543,26 @@ class ToolBox:
         }[action]
         pyautogui.press(key, presses=max(1, min(times, 50)), interval=0.03)
         return f"{action} x{times}"
+
+    # --- Русская Рыбалка 4 --------------------------------------------------
+
+    def tool_find_fishing_spot(self, target: str, water: str, open_link: bool = True) -> str:
+        from .fishing import FishingSearch, describe, tg_app_link
+
+        search = FishingSearch(self.fishing_channels)
+        hits = search.search(target, water)
+        sources = 3 + len(self.fishing_channels)
+        if not hits and len(search.errors) >= sources:
+            raise ToolError("Поиск в интернете сейчас недоступен (нет связи с поисковиком и Telegram): "
+                            + "; ".join(search.errors[:3]))
+        report = describe(target, water, hits)
+        if hits and open_link:
+            url = hits[0].url
+            if self.open_tg_in_app and "t.me/" in url:
+                url = tg_app_link(url)
+            webbrowser.open(url)
+            report += f"\nОткрыл в браузере: {hits[0].url}"
+        return report
 
     # --- напоминания и скриншоты ---------------------------------------------
 
