@@ -7,3 +7,4 @@ config.yaml
 *.log
 .tts_cache/
 memory/
+*.whl
