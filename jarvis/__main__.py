@@ -171,7 +171,12 @@ def run_voice(cfg) -> None:
                 say("Хорошо.")
                 continue
             if not command:
-                say("Слушаю.")
+                if cfg.wake_beep:
+                    from .speaker import beep
+
+                    beep()  # быстрее, чем говорить «Слушаю»
+                else:
+                    say("Слушаю.")
                 follow_until = time.time() + 8
                 continue
             if always and len(low) < 2:

@@ -55,6 +55,9 @@ class LLM:
         self.backend = cfg.llm_backend
         self.url = cfg.llm_url.rstrip("/")
         self.session = requests.Session()
+        if re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])", self.url):
+            # Локальный сервер — напрямую, мимо системного прокси/VPN, который мог бы его не пропустить.
+            self.session.trust_env = False
         self._no_think_ok: bool | None = None  # None — ещё не проверяли
         if cfg.llm_api_key:
             self.session.headers["Authorization"] = f"Bearer {cfg.llm_api_key}"

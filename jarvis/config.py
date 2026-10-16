@@ -32,6 +32,11 @@ class Config:
     tts_engine: str = "edge"
     edge_voice: str = "ru-RU-DmitryNeural"
     tts_rate: int = 0
+    voice_pitch: int = -8                 # тон голоса edge в Гц: минус — ниже, солиднее
+    piper_voice: str = "ru_RU-dmitri-medium"
+    voice_effect: str = "jarvis"          # для piper: jarvis — «голос ИИ», none — как есть
+    wake_beep: bool = True                # на «Джарвис» без команды — сигнал вместо «Слушаю»
+    city: str = "Москва"                  # для погоды по умолчанию
     confirm_dangerous: bool = True
     confirm_power: bool = True
     idle_reset_minutes: float = 10
@@ -56,6 +61,9 @@ class Config:
     # Перебить помощника, пока он говорит или думает
     interrupt_words: list = field(default_factory=lambda: ["стоп", "хватит", "заткнись", "замолчи", "отмена", "джарвис"])
     interrupt_confidence: float = 0.9
+    whisper_backend: str = "auto"        # auto / cpp (whisper.cpp) / faster (faster-whisper)
+    whisper_port: int = 8178
+    whisper_threads: int = 0             # 0 — сам решит по числу ядер
     stt_engine: str = "whisper"          # whisper — точнее (если установлен), vosk — только Vosk
     whisper_model: str = "small"         # tiny / base / small / medium / large-v3-turbo
     whisper_device: str = "cpu"          # cpu — процессор (не мешает игре), cuda — видеокарта

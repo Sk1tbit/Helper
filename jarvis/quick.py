@@ -41,6 +41,60 @@ TIMER_RE = re.compile(
 )
 
 
+VOLUME_RE = re.compile(r"^(?:поставь |сделай |установи )?громкость (?:на )?(?P<n>.+?)(?: процент\w*)?$")
+TIME_RE = re.compile(r"^(?:сколько (?:сейчас )?времени|который (?:сейчас )?час|сколько время|время)$")
+DATE_RE = re.compile(r"^(?:какое (?:сегодня )?число|какой сегодня день|какая сегодня дата|какое сегодня число и день)$")
+WEATHER_RE = re.compile(r"^(?:какая |что по |че по |чё по |скажи )?погод\w*(?: (?:в|во) (?P<city>[\w\s-]+?))?(?: сегодня| сейчас| на улице)?$")
+WEEKDAYS = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
+          "октября", "ноября", "декабря")
+DEFAULT_CITY = {"name": "Москва"}
+
+
+def info_command(t: str) -> str | None:
+    """Время, дата, погода — без нейросети."""
+    from datetime import datetime
+
+    now = datetime.now()
+    if TIME_RE.match(t):
+        return f"Сейчас {now:%H:%M}."
+    if DATE_RE.match(t):
+        return f"Сегодня {WEEKDAYS[now.weekday()]}, {now.day} {MONTHS[now.month - 1]}."
+    m = WEATHER_RE.match(t)
+    if m:
+        return weather(m.group("city") or DEFAULT_CITY["name"])
+    return None
+
+
+def weather(city: str) -> str | None:
+    """Погода с wttr.in (без ключей). Город можно в любом падеже — пробуем пару вариантов."""
+    import requests
+
+    city = city.strip()
+    # «в москве» -> «москва», «в санкт петербурге» -> «санкт-петербург»
+    words = city.split()
+    last = words[-1] if words else city
+    variants = [city, "-".join(words)]
+    if last.endswith("е") and len(last) > 3:
+        for ending in (last[:-1] + "а", last[:-1]):
+            variants += [" ".join(words[:-1] + [ending]), "-".join(words[:-1] + [ending])]
+    variants = list(dict.fromkeys(v for v in variants if v))
+    for name in variants:
+        try:
+            r = requests.get(f"https://wttr.in/{name}", params={"format": "j1", "lang": "ru"}, timeout=8)
+            data = r.json()
+            cur = data["current_condition"][0]
+        except (requests.RequestException, ValueError, KeyError, IndexError):
+            continue
+        desc = (cur.get("lang_ru") or cur.get("weatherDesc") or [{"value": ""}])[0]["value"].strip().lower()
+        temp, feels = int(cur["temp_C"]), int(cur["FeelsLikeC"])
+        wind = round(int(cur.get("windspeedKmph", 0)) / 3.6)
+        sign = lambda v: f"плюс {v}" if v > 0 else (f"минус {-v}" if v < 0 else "ноль")
+        place = name[:1].upper() + name[1:]
+        return (f"{place}: {desc}, {sign(temp)}, ощущается как {sign(feels)}, ветер {wind} метров в секунду.")
+    return None
+
+
 PC = r"(?:комп\w*|пк|ноут\w*|систем\w*)"
 DELAY = r"(?: через (?P<amount>.*?) ?(?P<unit>секунд\w*|минут\w*|час\w*|полчаса|полтора часа))?"
 POWER_RES = [
@@ -136,6 +190,25 @@ def quick_command(text: str, run_tool: Callable[[str, dict], str]) -> str | None
                 print(f"[quick] не вышло: {e}")
                 return None
             return reply
+
+    info = info_command(t)
+    if info is not None:
+        return info
+
+    vol = VOLUME_RE.match(t)
+    if vol:
+        level = parse_amount(vol.group("n"))
+        if level is not None and 0 <= level <= 100:
+            print(f"[quick] громкость {level}%")
+            try:
+                # Точной громкости через мультимедийные клавиши нет: в ноль и вверх (1 нажатие ≈ 2%).
+                run_tool("media", {"action": "volume_down", "times": 50})
+                if level:
+                    run_tool("media", {"action": "volume_up", "times": round(level / 2)})
+            except Exception as e:
+                print(f"[quick] не вышло: {e}")
+                return None
+            return f"Громкость {int(level)} процентов."
 
     power = parse_power(t)
     if power:

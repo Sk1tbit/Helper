@@ -8,3 +8,4 @@ config.yaml
 .tts_cache/
 memory/
 *.whl
+tools/

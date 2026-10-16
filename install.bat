@@ -38,9 +38,14 @@ if errorlevel 1 (
   exit /b 1
 )
 python scripts\download_model.py
-echo Installing Whisper for better speech recognition (optional)...
-pip install faster-whisper
-if errorlevel 1 echo [i] Whisper did not install - Jarvis will use Vosk only. Python 3.12 usually works.
+echo.
+echo Installing whisper.cpp for accurate speech recognition (~0.5 GB)...
+python scripts\setup_whisper.py
+if errorlevel 1 echo [i] whisper.cpp was not installed - Jarvis will use Vosk only. Retry: python scripts\setup_whisper.py
+echo.
+echo Installing offline Piper voice (~70 MB)...
+python scripts\setup_piper.py dmitri
+if errorlevel 1 echo [i] Piper was not installed - Jarvis will use the edge voice. Retry: python scripts\setup_piper.py
 if not exist config.yaml copy config.example.yaml config.yaml >nul
 where ollama >nul 2>nul
 if errorlevel 1 (
