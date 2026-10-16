@@ -33,6 +33,7 @@ class Config:
     edge_voice: str = "ru-RU-DmitryNeural"
     tts_rate: int = 0
     confirm_dangerous: bool = True
+    confirm_power: bool = True
     idle_reset_minutes: float = 10
     learning: bool = True
     quick_commands: bool = True

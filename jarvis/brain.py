@@ -107,6 +107,7 @@ class Brain:
         vision = self.llm.describe_image if cfg.vision_model else None
         self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous,
                                vision=vision, notify=notify or say)
+        self.toolbox.confirm_power = cfg.confirm_power
         self.toolbox.fishing_channels = list(cfg.fishing_tg_channels or [])
         self.toolbox.tg_open_mode = "app" if cfg.open_tg_in_app else cfg.tg_open_mode
         self.toolbox.discord_token = cfg.discord_bot_token or os.environ.get("DISCORD_BOT_TOKEN", "")

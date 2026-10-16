@@ -117,7 +117,7 @@ def _styled(say, cfg):
 def _handle_local(command: str, brain, say) -> bool:
     """Команды, для которых не нужна нейросеть. True — если команда обработана."""
     low = " " + re.sub(r"[^\w\s]", "", command.lower()) + " "
-    if any(f" {p} " in low for p in EXIT_PHRASES):
+    if any(f" {p} " in low for p in EXIT_PHRASES) and not re.search(r"комп|пк|ноут|систем", low):
         say("Отключаюсь. Хорошего дня.")
         raise SystemExit
     if any(f" {p} " in low for p in RESET_PHRASES):

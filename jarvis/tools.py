@@ -359,10 +359,14 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "power",
-        "description": "Блокировка, сон, перезагрузка или выключение компьютера. Всё, кроме lock, требует подтверждения.",
+        "description": "Блокировка, сон, перезагрузка, выключение компьютера (сразу или через delay_minutes) "
+        "и отмена запланированного выключения (cancel). Сон, перезагрузка и выключение спрашивают подтверждение.",
         "input_schema": {
             "type": "object",
-            "properties": {"action": {"type": "string", "enum": ["lock", "sleep", "restart", "shutdown"]}},
+            "properties": {
+                "action": {"type": "string", "enum": ["lock", "sleep", "restart", "shutdown", "cancel"]},
+                "delay_minutes": {"type": "number", "description": "Через сколько минут; 0 — сразу"},
+            },
             "required": ["action"],
             "additionalProperties": False,
         },
@@ -386,6 +390,7 @@ class ToolBox:
     ):
         self.confirm = confirm
         self.confirm_dangerous = confirm_dangerous
+        self.confirm_power = True  # спрашивать «да/нет» перед выключением, перезагрузкой и сном
         # vision(картинка_base64, вопрос) -> ответ мультимодальной модели.
         self.vision = vision
         # notify(текст) — сказать что-то вслух вне разговора (напоминания).
@@ -737,33 +742,70 @@ class ToolBox:
         psutil.wait_procs(victims, timeout=3)
         return f"Закрыто процессов {name}: {len(victims)}"
 
-    def tool_power(self, action: str) -> str:
-        if action != "lock":
-            names = {"sleep": "Отправить компьютер в сон", "restart": "Перезагрузить компьютер", "shutdown": "Выключить компьютер"}
-            self._ask(f"{names[action]}?")
+    def tool_power(self, action: str, delay_minutes: float = 0) -> str:
+        delay = max(0.0, float(delay_minutes or 0))
+        if action == "cancel":
+            return self._power_cancel()
+        if action not in ("lock", "sleep", "restart", "shutdown"):
+            raise ToolError(f"Неизвестное действие: {action}")
+        if action != "lock" and self.confirm_power:
+            names = {"sleep": "Отправить компьютер в сон", "restart": "Перезагрузить компьютер",
+                     "shutdown": "Выключить компьютер"}
+            when = f" через {_human_minutes(delay)}" if delay else ""
+            if not self.confirm(f"{names[action]}{when}?"):
+                raise ToolError("Пользователь не подтвердил действие.")
+
+        # Выключение/перезагрузку ставим самой системе: сработает, даже если Джарвис закрыть.
+        seconds = max(10, round(delay * 60))  # 10 секунд — успеть сказать «отмена» и сохранить память
+        if action in ("shutdown", "restart") and SYSTEM == "Windows":
+            flag = "/s" if action == "shutdown" else "/r"
+            subprocess.run(["shutdown", flag, "/t", str(seconds)], check=False)
+            return f"{'Выключение' if action == 'shutdown' else 'Перезагрузка'} через {_human_minutes(seconds / 60)}. " \
+                   f"Отменить: «отмени выключение»."
+        if action in ("shutdown", "restart") and SYSTEM in ("Linux", "Darwin"):
+            minutes = max(1, round(delay)) if delay else "now"
+            flag = "-h" if action == "shutdown" else "-r"
+            subprocess.Popen(["shutdown", flag, f"+{minutes}" if minutes != "now" else "now"])
+            return f"{action} запланирован"
+
         commands = {
             "Windows": {
-                "lock": "rundll32.exe user32.dll,LockWorkStation",
-                "sleep": "rundll32.exe powrprof.dll,SetSuspendState 0,1,0",
-                "restart": "shutdown /r /t 5",
-                "shutdown": "shutdown /s /t 5",
+                "lock": ["rundll32.exe", "user32.dll,LockWorkStation"],
+                # rundll32 SetSuspendState часто уводит в гибернацию — через .NET это честный сон.
+                "sleep": ["powershell", "-NoProfile", "-Command",
+                          "Add-Type -AssemblyName System.Windows.Forms; "
+                          "[System.Windows.Forms.Application]::SetSuspendState('Suspend', $false, $false)"],
             },
-            "Darwin": {
-                "lock": "pmset displaysleepnow",
-                "sleep": "pmset sleepnow",
-                "restart": "osascript -e 'tell app \"System Events\" to restart'",
-                "shutdown": "osascript -e 'tell app \"System Events\" to shut down'",
-            },
-            "Linux": {
-                "lock": "loginctl lock-session",
-                "sleep": "systemctl suspend",
-                "restart": "systemctl reboot",
-                "shutdown": "systemctl poweroff",
-            },
+            "Darwin": {"lock": ["pmset", "displaysleepnow"], "sleep": ["pmset", "sleepnow"]},
+            "Linux": {"lock": ["loginctl", "lock-session"], "sleep": ["systemctl", "suspend"]},
         }[SYSTEM]
-        subprocess.Popen(commands[action], shell=True)
-        return f"Выполняется: {action}"
+        if delay and action == "sleep":
+            timer = threading.Timer(delay * 60, lambda: subprocess.Popen(commands["sleep"]))
+            timer.daemon = True
+            timer.start()
+            with self._timers_lock:
+                self._timers.append((time.time() + delay * 60, "сон компьютера", timer))
+            return f"Сон через {_human_minutes(delay)}"
+        subprocess.Popen(commands[action])
+        return {"lock": "Компьютер заблокирован", "sleep": "Отправляю в сон"}[action]
 
+    def _power_cancel(self) -> str:
+        cancelled = []
+        if SYSTEM == "Windows":
+            r = subprocess.run(["shutdown", "/a"], capture_output=True, text=True, errors="replace")
+            if r.returncode == 0:
+                cancelled.append("выключение/перезагрузка")
+        elif SYSTEM in ("Linux", "Darwin"):
+            if subprocess.run(["shutdown", "-c"], capture_output=True).returncode == 0:
+                cancelled.append("выключение")
+        with self._timers_lock:
+            sleepers = [t for t in self._timers if t[1] == "сон компьютера"]
+            for _, _, timer in sleepers:
+                timer.cancel()
+            self._timers = [t for t in self._timers if t not in sleepers]
+        if sleepers:
+            cancelled.append("сон")
+        return "Отменено: " + ", ".join(cancelled) if cancelled else "Ничего не было запланировано"
 
 def _normalize_key(key: str) -> str:
     key = key.strip().lower()

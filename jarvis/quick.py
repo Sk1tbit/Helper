@@ -20,7 +20,7 @@ MEDIA_COMMANDS: list[tuple[str, str, dict, str]] = [
     (r"(следующ\w*|дальше|переключи)( трек| песню| песня| видео)?", "media", {"action": "next", "times": 1}, "Следующий."),
     (r"(предыдущ\w*|назад)( трек| песню| песня| видео)?", "media", {"action": "previous", "times": 1}, "Предыдущий."),
     (r"сверни (все|всё)( окна)?|покажи рабочий стол", "press_keys", {"keys": ["win", "d"]}, "Свернул."),
-    (r"заблокируй (комп|компьютер|экран|пк)", "power", {"action": "lock"}, "Блокирую."),
+    (r"заблокируй (комп|компьютер|экран|пк)", "power", {"action": "lock", "delay_minutes": 0}, "Блокирую."),
     (r"(сделай |сохрани )?(скрин|скриншот|снимок экрана)( сохрани| сделай)?|сохрани (экран|трофей)", "save_screenshot", {}, "Скриншот сохранён."),
     (r"(отмени|удали|сбрось) (все )?(напоминания|напоминание|таймеры|таймер)", "cancel_timers", {"text": ""}, "Напоминания отменены."),
 ]
@@ -39,6 +39,39 @@ TIMER_RE = re.compile(
     r"(?P<unit>секунд\w*|минут\w*|час\w*|полчаса|полтора часа)"
     r"(?:\s+(?:что(?:бы)?|чтоб|о том что|про)(?=\s))?\s*(?P<text>.*)$"
 )
+
+
+PC = r"(?:комп\w*|пк|ноут\w*|систем\w*)"
+DELAY = r"(?: через (?P<amount>.*?) ?(?P<unit>секунд\w*|минут\w*|час\w*|полчаса|полтора часа))?"
+POWER_RES = [
+    ("cancel", re.compile(r"^(?:отмени|отменить|стоп|отбой) (?:выключени\w*|перезагрузк\w*|сон|выключение компа)$"
+                          r"|^не (?:выключай|перезагружай)(?: " + PC + r")?$")),
+    ("shutdown", re.compile(r"^(?:выключи|выключить|выруби|вырубай|вырубить|отключи|заверши работу) " + PC + DELAY + r"$")),
+    ("restart", re.compile(r"^(?:перезагрузи|перезагрузить|ребутни|перезапусти) " + PC + DELAY + r"$")),
+    ("sleep", re.compile(r"^(?:(?:отправь|переведи|уведи)(?: " + PC + r")? в (?:сон|спящий режим)|усыпи " + PC
+                         + r"|" + PC + r" в сон)" + DELAY + r"$")),
+]
+
+
+def parse_power(t: str) -> tuple[str, float] | None:
+    """«выключи комп через полчаса» -> ("shutdown", 30). «отмени выключение» -> ("cancel", 0)."""
+    for action, regex in POWER_RES:
+        m = regex.match(t)
+        if not m:
+            continue
+        unit = m.groupdict().get("unit")
+        if not unit:
+            return action, 0
+        if unit == "полчаса":
+            return action, 30
+        if unit == "полтора часа":
+            return action, 90
+        amount = parse_amount(m.group("amount") or "")
+        if amount is None:
+            return None
+        key = next(k for k in UNITS if unit.startswith(k))
+        return action, amount * UNITS[key]
+    return None
 
 
 def parse_amount(words: str) -> float | None:
@@ -103,6 +136,18 @@ def quick_command(text: str, run_tool: Callable[[str, dict], str]) -> str | None
                 print(f"[quick] не вышло: {e}")
                 return None
             return reply
+
+    power = parse_power(t)
+    if power:
+        action, minutes = power
+        print(f"[quick] power {action} через {minutes} мин")
+        try:
+            return run_tool("power", {"action": action, "delay_minutes": minutes})
+        except ToolError as e:
+            return "Ок, не трогаю." if "не подтвердил" in str(e) else None
+        except Exception as e:
+            print(f"[quick] не вышло: {e}")
+            return None
 
     timer = parse_timer(t)
     if timer:
