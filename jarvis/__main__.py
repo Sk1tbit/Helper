@@ -44,8 +44,10 @@ def run_voice(cfg) -> None:
             finally:
                 listener.unmute()
 
+    say = _styled(say, cfg)
+
     def confirm(question: str) -> bool:
-        say(question + " Скажите да или нет.")
+        say(question + (" Да или нет?" if cfg.swearing else " Скажите да или нет."))
         answer = listener.next_utterance(timeout=7)
         print(f"Вы: {answer or '(молчание)'}")
         return is_yes(answer)
@@ -59,7 +61,7 @@ def run_voice(cfg) -> None:
         print(f"[!] {problem}")
         say("Внимание: не могу достучаться до нейросети. Подробности в консоли.")
     else:
-        say(f"{cfg.assistant_name} на связи.")
+        say(f"{cfg.assistant_name} на связи, бля. Чё делаем?" if cfg.swearing else f"{cfg.assistant_name} на связи.")
 
     try:
         while True:
@@ -102,6 +104,16 @@ def run_voice(cfg) -> None:
         brain.shutdown()
 
 
+def _styled(say, cfg):
+    """Обёртка над say: готовые фразы в выбранном стиле (с матом или без)."""
+    from .persona import phrase
+
+    def styled(text: str):
+        return say(phrase(text, cfg.swearing))
+
+    return styled
+
+
 def _handle_local(command: str, brain, say) -> bool:
     """Команды, для которых не нужна нейросеть. True — если команда обработана."""
     low = " " + re.sub(r"[^\w\s]", "", command.lower()) + " "
@@ -130,7 +142,10 @@ def run_text(cfg) -> None:
     def confirm(question: str) -> bool:
         return is_yes(input(f"{cfg.assistant_name}: {question} [да/нет] > "))
 
+    say = _styled(say, cfg)
+
     def notify(text: str) -> None:
+        text = _styled(lambda t: t, cfg)(text)
         print(f"\n{cfg.assistant_name}: {text}\nВы: ", end="", flush=True)
 
     brain = Brain(cfg, say=say, confirm=confirm, notify=notify)

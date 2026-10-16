@@ -202,6 +202,14 @@ class FishingSearch:
         return [h for h in hits if h.score >= 3 and all(w in _norm(f"{h.title} {h.text}") for w in t_words)][:6]
 
 
+def tg_web_link(url: str) -> str:
+    """https://t.me/channel/123 -> пост в веб-версии Telegram (web.telegram.org)."""
+    from urllib.parse import quote
+
+    tg = tg_app_link(url)
+    return f"https://web.telegram.org/a/#?tgaddr={quote(tg, safe='')}" if tg.startswith("tg://") else url
+
+
 def tg_app_link(url: str) -> str:
     """https://t.me/channel/123 -> tg://resolve?domain=channel&post=123 (откроется в приложении)."""
     m = re.match(r"https?://t\.me/(?:s/)?([\w_]+)/(\d+)", url)

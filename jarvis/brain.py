@@ -11,6 +11,7 @@ from typing import Callable
 from .config import Config
 from .learning import MEMORY_TOOLS, forget, memory_snapshot, remember, transcript
 from .llm import LLM, LLMError
+from .persona import SWEAR_NOTE
 from .quick import quick_command
 from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError
 
@@ -106,10 +107,12 @@ class Brain:
         self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous,
                                vision=vision, notify=notify or say)
         self.toolbox.fishing_channels = list(cfg.fishing_tg_channels or [])
-        self.toolbox.open_tg_in_app = cfg.open_tg_in_app
+        self.toolbox.tg_open_mode = "app" if cfg.open_tg_in_app else cfg.tg_open_mode
         self.game_mode = False
         self._normal_models = (cfg.model, cfg.vision_model)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)
+        if cfg.swearing:
+            self.system += SWEAR_NOTE
         tools = TOOLS if vision else [t for t in TOOLS if t["name"] not in VISION_TOOLS]
         self.tools = tools + MEMORY_TOOLS
         self.messages: list[dict] = []
@@ -200,7 +203,7 @@ class Brain:
         if not parsed:
             return False
         target, water = parsed
-        self.say(f"Ищу {target}, {water}.")
+        self.say(f"Ищу: {target}, {water}.")
         report = self._run_tool("find_fishing_spot", {"target": target, "water": water, "open_link": True})
         print(report)
         if report.startswith("Ошибка"):
@@ -213,7 +216,7 @@ class Brain:
             reply = self.llm.chat([
                 {"role": "system", "content": "Ты голосовой помощник. По результатам поиска скажи в 1–2 коротких "
                  "предложениях по-русски: координаты точки и на что ловить. Если данных нет — так и скажи. "
-                 "Без ссылок и markdown."},
+                 "Без ссылок и markdown." + (SWEAR_NOTE if self.cfg.swearing else "")},
                 {"role": "user", "content": report},
             ])["content"]
         except LLMError as e:

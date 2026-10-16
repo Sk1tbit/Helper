@@ -393,7 +393,8 @@ class ToolBox:
         self._timers: list[tuple[float, str, threading.Timer]] = []
         self._timers_lock = threading.Lock()
         self.fishing_channels: list[str] = []
-        self.open_tg_in_app = False
+        # Куда открывать посты из Telegram: web — web.telegram.org, app — приложение, browser — t.me.
+        self.tg_open_mode = "web"
         # Во сколько раз реальный экран больше отправленного скриншота.
         self.screen_scale = 1.0
 
@@ -547,7 +548,7 @@ class ToolBox:
     # --- Русская Рыбалка 4 --------------------------------------------------
 
     def tool_find_fishing_spot(self, target: str, water: str, open_link: bool = True) -> str:
-        from .fishing import FishingSearch, describe, tg_app_link
+        from .fishing import FishingSearch, describe, tg_app_link, tg_web_link
 
         search = FishingSearch(self.fishing_channels)
         hits = search.search(target, water)
@@ -558,7 +559,9 @@ class ToolBox:
         report = describe(target, water, hits)
         if hits and open_link:
             url = hits[0].url
-            if self.open_tg_in_app and "t.me/" in url:
+            if "t.me/" in url and self.tg_open_mode == "web":
+                url = tg_web_link(url)
+            elif "t.me/" in url and self.tg_open_mode == "app":
                 url = tg_app_link(url)
             webbrowser.open(url)
             report += f"\nОткрыл в браузере: {hits[0].url}"
