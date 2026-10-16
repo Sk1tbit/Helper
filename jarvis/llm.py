@@ -215,8 +215,13 @@ class LLM:
             detail = str(detail)[:300]
             if "does not support tools" in detail:
                 raise LLMError(detail, "Эта модель не умеет управлять компьютером. Выберите модель с поддержкой инструментов.")
-            if "not found" in detail and "model" in detail:
-                raise LLMError(detail, "Модель не найдена. Скачайте её командой ollama pull.")
+            low = detail.lower()
+            if "model" in low and ("not found" in low or "not loaded" in low or "no models" in low):
+                if self.backend == "ollama":
+                    raise LLMError(detail, "Модель не найдена. Скачайте её командой ollama pull.")
+                print("[!] Модель не загружена на сервере. В LM Studio: вкладка Developer → загрузи модель "
+                      "и скопируй её API identifier в config.yaml (строки model и vision_model).")
+                raise LLMError(detail, "Модель не загружена в LM Studio. Загрузите её во вкладке Developer.")
             raise LLMError(f"Ошибка нейросети ({r.status_code}): {detail}")
         return r.json()
 
