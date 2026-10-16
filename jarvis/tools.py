@@ -1,4 +1,4 @@
-"""Инструменты, через которые Claude управляет компьютером.
+"""Инструменты, через которые нейросеть управляет компьютером.
 
 Каждый инструмент — метод ToolBox с описанием-схемой в TOOLS. Тяжёлые библиотеки
 (pyautogui, mss) импортируются лениво, чтобы текстовый режим работал где угодно.
@@ -101,19 +101,24 @@ TOOLS: list[dict[str, Any]] = [
                 "query": {"type": "string"},
                 "engine": {"type": "string", "enum": ["google", "yandex", "youtube"]},
             },
-            "required": ["query", "engine"],
+            "required": ["query"],
             "additionalProperties": False,
         },
     },
     {
-        "name": "screenshot",
-        "description": "Делает снимок экрана. Используй, чтобы увидеть, что сейчас открыто, "
-        "найти кнопку перед кликом или подсказать пользователю, что делать на экране.",
-        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "name": "look_at_screen",
+        "description": "Смотрит на экран и отвечает на вопрос о нём: что открыто, что написано, "
+        "где кнопка (с координатами для клика). Используй, когда просят подсказать или помочь с тем, что на экране.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"question": {"type": "string", "description": "Что нужно узнать на экране"}},
+            "required": ["question"],
+            "additionalProperties": False,
+        },
     },
     {
         "name": "mouse_click",
-        "description": "Кликает мышью в точку. Координаты — в пикселях последнего скриншота.",
+        "description": "Кликает мышью в точку. Координаты — те, что вернул look_at_screen.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -122,7 +127,7 @@ TOOLS: list[dict[str, Any]] = [
                 "button": {"type": "string", "enum": ["left", "right", "middle"]},
                 "double": {"type": "boolean"},
             },
-            "required": ["x", "y", "button", "double"],
+            "required": ["x", "y"],
             "additionalProperties": False,
         },
     },
@@ -145,7 +150,7 @@ TOOLS: list[dict[str, Any]] = [
                 "text": {"type": "string"},
                 "press_enter": {"type": "boolean", "description": "Нажать Enter после ввода"},
             },
-            "required": ["text", "press_enter"],
+            "required": ["text"],
             "additionalProperties": False,
         },
     },
@@ -171,7 +176,17 @@ TOOLS: list[dict[str, Any]] = [
                 },
                 "times": {"type": "integer", "description": "Сколько раз нажать (для громкости 1 нажатие ≈ 2%)"},
             },
-            "required": ["action", "times"],
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "web_search",
+        "description": "Ищет в интернете и возвращает краткие результаты. Для вопросов о фактах, новостях, погоде, курсах.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
             "additionalProperties": False,
         },
     },
@@ -204,7 +219,7 @@ TOOLS: list[dict[str, Any]] = [
                 "name_part": {"type": "string"},
                 "folder": {"type": "string", "description": "Где искать; пустая строка = домашняя папка"},
             },
-            "required": ["name_part", "folder"],
+            "required": ["name_part"],
             "additionalProperties": False,
         },
     },
@@ -217,7 +232,7 @@ TOOLS: list[dict[str, Any]] = [
                 "action": {"type": "string", "enum": ["read", "write"]},
                 "text": {"type": "string", "description": "Текст для записи (для read — пустая строка)"},
             },
-            "required": ["action", "text"],
+            "required": ["action"],
             "additionalProperties": False,
         },
     },
@@ -231,7 +246,7 @@ TOOLS: list[dict[str, Any]] = [
                 "command": {"type": "string"},
                 "explanation": {"type": "string", "description": "Коротко по-русски: что делает команда (зачитается при подтверждении)"},
             },
-            "required": ["command", "explanation"],
+            "required": ["command"],
             "additionalProperties": False,
         },
     },
@@ -257,8 +272,7 @@ TOOLS: list[dict[str, Any]] = [
     },
 ]
 
-for _tool in TOOLS:
-    _tool["strict"] = True
+VISION_TOOLS = {"look_at_screen", "mouse_click"}
 
 
 class ToolError(Exception):
@@ -266,13 +280,20 @@ class ToolError(Exception):
 
 
 class ToolBox:
-    def __init__(self, confirm: Callable[[str], bool], confirm_dangerous: bool = True):
+    def __init__(
+        self,
+        confirm: Callable[[str], bool],
+        confirm_dangerous: bool = True,
+        vision: Callable[[str, str], str] | None = None,
+    ):
         self.confirm = confirm
         self.confirm_dangerous = confirm_dangerous
+        # vision(картинка_base64, вопрос) -> ответ мультимодальной модели.
+        self.vision = vision
         # Во сколько раз реальный экран больше отправленного скриншота.
         self.screen_scale = 1.0
 
-    def run(self, name: str, args: dict[str, Any]) -> str | list[dict[str, Any]]:
+    def run(self, name: str, args: dict[str, Any]) -> str:
         method = getattr(self, f"tool_{name}", None)
         if method is None:
             raise ToolError(f"Нет такого инструмента: {name}")
@@ -311,18 +332,19 @@ class ToolBox:
         webbrowser.open(url)
         return f"Открыто: {url}"
 
-    def tool_browser_search(self, query: str, engine: str) -> str:
+    def tool_browser_search(self, query: str, engine: str = "google") -> str:
         base = {
             "google": "https://www.google.com/search?q=",
             "yandex": "https://yandex.ru/search/?text=",
             "youtube": "https://www.youtube.com/results?search_query=",
-        }[engine]
+        }.get(engine, "https://www.google.com/search?q=")
         webbrowser.open(base + quote_plus(query))
         return f"Открыт поиск {engine}: {query}"
 
     # --- экран, мышь, клавиатура --------------------------------------------
 
-    def tool_screenshot(self) -> list[dict[str, Any]]:
+    def capture_screen(self) -> tuple[str, int, int]:
+        """Скриншот основного монитора в JPEG base64, уменьшенный до SCREENSHOT_MAX_WIDTH."""
         import mss
         from PIL import Image
 
@@ -333,14 +355,21 @@ class ToolBox:
         if self.screen_scale > 1:
             img = img.resize((round(img.width / self.screen_scale), round(img.height / self.screen_scale)))
         buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=70)
-        data = base64.standard_b64encode(buf.getvalue()).decode()
-        return [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}},
-            {"type": "text", "text": f"Скриншот {img.width}x{img.height}. Координаты для кликов — в этих пикселях."},
-        ]
+        img.save(buf, format="JPEG", quality=75)
+        return base64.standard_b64encode(buf.getvalue()).decode(), img.width, img.height
 
-    def tool_mouse_click(self, x: int, y: int, button: str, double: bool) -> str:
+    def tool_look_at_screen(self, question: str) -> str:
+        if self.vision is None:
+            raise ToolError("Модель для зрения не настроена (vision_model в config.yaml)")
+        image, w, h = self.capture_screen()
+        prompt = (
+            f"Это скриншот экрана размером {w}x{h} пикселей. {question}\n"
+            "Отвечай по-русски и по делу. Если речь о кнопке, поле или другом элементе, "
+            "назови его примерные координаты центра в пикселях этого скриншота в виде (x, y)."
+        )
+        return f"Экран {w}x{h}. " + self.vision(image, prompt)
+
+    def tool_mouse_click(self, x: int, y: int, button: str = "left", double: bool = False) -> str:
         import pyautogui
 
         rx, ry = round(x * self.screen_scale), round(y * self.screen_scale)
@@ -353,7 +382,7 @@ class ToolBox:
         pyautogui.scroll(amount * 120 if SYSTEM == "Windows" else amount)
         return f"Прокручено на {amount}"
 
-    def tool_type_text(self, text: str, press_enter: bool) -> str:
+    def tool_type_text(self, text: str, press_enter: bool = False) -> str:
         import pyautogui
         import pyperclip
 
@@ -379,7 +408,7 @@ class ToolBox:
             pyautogui.hotkey(*keys)
         return f"Нажато: {'+'.join(keys)}"
 
-    def tool_media(self, action: str, times: int) -> str:
+    def tool_media(self, action: str, times: int = 1) -> str:
         import pyautogui
 
         key = {
@@ -392,6 +421,16 @@ class ToolBox:
         }[action]
         pyautogui.press(key, presses=max(1, min(times, 50)), interval=0.03)
         return f"{action} x{times}"
+
+    def tool_web_search(self, query: str) -> str:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+        results = DDGS().text(query, region="ru-ru", max_results=5)
+        if not results:
+            return "Ничего не нашлось"
+        return "\n\n".join(f"{r.get('title', '')}\n{r.get('body', '')}\n{r.get('href', '')}" for r in results)
 
     # --- окна ---------------------------------------------------------------
 
@@ -440,7 +479,7 @@ class ToolBox:
         lines.append("Больше всего памяти: " + ", ".join(f"{n} {r / 2**20:.0f} МБ" for r, n in procs[:5]))
         return "\n".join(lines)
 
-    def tool_find_files(self, name_part: str, folder: str) -> str:
+    def tool_find_files(self, name_part: str, folder: str = "") -> str:
         root = Path(folder).expanduser() if folder else Path.home()
         if not root.exists():
             raise ToolError(f"Папка не найдена: {root}")
@@ -457,7 +496,7 @@ class ToolBox:
                 break
         return "\n".join(found[:30]) or "Ничего не найдено"
 
-    def tool_clipboard(self, action: str, text: str) -> str:
+    def tool_clipboard(self, action: str, text: str = "") -> str:
         import pyperclip
 
         if action == "write":
@@ -466,8 +505,8 @@ class ToolBox:
         content = _safe_paste(pyperclip) or ""
         return content[:5000] or "Буфер пуст"
 
-    def tool_run_command(self, command: str, explanation: str) -> str:
-        self._ask(f"Выполнить команду: {explanation}?")
+    def tool_run_command(self, command: str, explanation: str = "") -> str:
+        self._ask(f"Выполнить команду: {explanation or command}?")
         if SYSTEM == "Windows":
             argv = ["powershell", "-NoProfile", "-Command", command]
         else:

@@ -1,4 +1,4 @@
-"""Мозг помощника: диалог с Claude, цикл вызова инструментов и обучение на разговорах."""
+"""Мозг помощника: диалог с локальной нейросетью, вызов инструментов и обучение на разговорах."""
 
 from __future__ import annotations
 
@@ -7,74 +7,47 @@ import time
 from datetime import datetime
 from typing import Callable
 
-import anthropic
-from anthropic.tools.memory import BetaLocalFilesystemMemoryTool
-
 from .config import Config
-from .learning import MEMORY_DIR, memory_snapshot, transcript
-from .tools import SYSTEM, TOOLS, ToolBox, ToolError
+from .learning import MEMORY_TOOLS, forget, memory_snapshot, remember, transcript
+from .llm import LLM, LLMError
+from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError
 
-MAX_STEPS = 30          # максимум шагов (вызовов инструментов) на одну просьбу
-MAX_MESSAGES = 60       # после этого начинаем разговор заново, чтобы не раздувать контекст
-MAX_REFLECT_STEPS = 12
+MAX_STEPS = 15          # максимум шагов (вызовов инструментов) на одну просьбу
+MAX_MESSAGES = 40       # после этого начинаем разговор заново — у локальных моделей мало контекста
+MAX_REFLECT_STEPS = 10
+TOOL_RESULT_LIMIT = 3000
 
 SYSTEM_PROMPT = """Ты — {name}, голосовой помощник в стиле Джарвиса из "Железного человека". \
-Ты работаешь на компьютере пользователя ({os}) и можешь им управлять через инструменты: \
-запускать программы, открывать сайты, смотреть на экран, кликать, печатать, нажимать клавиши, \
-управлять звуком, выполнять команды в консоли. Обращайся к пользователю "{user}", если в памяти \
-не записано, как он предпочитает.
+Ты работаешь на компьютере пользователя ({os}) и управляешь им через инструменты. \
+Обращайся к пользователю "{user}", если в памяти не записано иначе.
 
 Как отвечать:
-- Твои ответы зачитываются вслух синтезатором речи. Говори по-русски, коротко и по делу — \
-обычно одно-два предложения. Никакого markdown, списков, эмодзи, ссылок и кода в ответе.
-- Перед долгим делом из нескольких шагов скажи одной фразой, что собираешься сделать.
-- Речь распознаётся автоматически и может быть с ошибками — догадывайся по смыслу. Если просьба \
-совсем непонятна, коротко переспроси.
+- Ответ зачитывается вслух. Всегда говори по-русски, коротко: одно-два предложения. \
+Никакого markdown, списков, эмодзи и ссылок.
+- Речь распознаётся автоматически и бывает с ошибками — догадывайся по смыслу. \
+Если совсем непонятно, коротко переспроси.
 
 Как действовать:
-- Если просят что-то сделать на компьютере — делай сам, а не объясняй, как это сделать.
-- Если просят подсказать или помочь с тем, что на экране, сначала сделай скриншот.
-- Прежде чем кликать, сделай скриншот, чтобы знать координаты. После важных действий \
-проверяй результат новым скриншотом.
-- Для вопросов о фактах, новостях, погоде, курсах используй веб-поиск.
-- Не выполняй разрушительных действий (удаление файлов, форматирование и т.п.), если о них \
-не попросили прямо. Опасные инструменты сами спросят подтверждение у пользователя.
-- Когда задача выполнена — коротко доложи.
+- Просят что-то сделать на компьютере — вызывай инструмент, а не объясняй, как это сделать.
+- Просят подсказать с тем, что на экране, — сначала look_at_screen.
+- Чтобы кликнуть, сначала узнай координаты через look_at_screen.
+- Вопросы о фактах, новостях, погоде, курсах — web_search.
+- Не делай разрушительных действий, если о них не просили прямо. Опасные инструменты сами \
+спросят подтверждение.
+- Сделал — коротко доложи.
 
-Память и подстройка под пользователя:
-- У тебя есть долговременная память — папка /memories (инструмент memory). Её содержимое \
-приходит в начале каждого разговора в теге <memory>. Следуй тому, что там записано: \
-предпочтения, привычные программы и сайты, личные команды пользователя важнее твоих догадок.
-- Сразу записывай в память, когда пользователь: просит что-то запомнить; называет \
-предпочтение ("я слушаю музыку в Яндекс Музыке", "говори короче"); поправляет тебя \
-("не тот браузер", "я имел в виду другое"); придумывает свою команду ("когда говорю \
-рабочий режим — открой почту и VS Code"). Записывай и то, что выяснил сам с трудом: \
-где лежит программа, какая команда сработала, где на экране нужная кнопка.
-- Раскладывай по файлам: /memories/profile.md (кто пользователь, как обращаться, стиль ответов), \
-/memories/preferences.md (любимые программы, сайты, привычки), /memories/commands.md (личные \
-команды и что они значат), /memories/pc.md (что сработало на этом компьютере). Пиши кратко, \
-по одному факту в строке, обновляй устаревшее, а не дублируй.
-- Никогда не сохраняй пароли, ключи, номера карт и коды.
-- Работу с памятью не озвучивай подробно — максимум "запомнил"."""
+Память:
+- В начале разговора в теге <memory> лежит то, что ты знаешь о пользователе. Следуй этому: \
+его предпочтения и личные команды важнее твоих догадок.
+- Вызывай remember, когда пользователь просит запомнить, называет предпочтение, поправляет тебя \
+или придумывает свою команду. Вызывай forget, если факт устарел или неверен.
+- Не сохраняй пароли, ключи и коды. Про память говори максимум "запомнил"."""
 
-REFLECT_SYSTEM = """Ты — модуль самообучения голосового помощника {name}. Тебе показывают \
-запись только что закончившегося разговора с пользователем и текущую память помощника. \
-Твоя задача — улучшить память, чтобы в следующий раз помощник лучше подстроился под пользователя."""
+REFLECT_SYSTEM = """Ты — модуль самообучения голосового помощника {name}. Ты разбираешь \
+законченный разговор и обновляешь память помощника инструментами remember и forget, \
+чтобы в следующий раз он лучше подстроился под пользователя."""
 
-REFLECT_PROMPT = """Разбери разговор и обнови память инструментом memory.
-
-Что стоит записать:
-- новые факты о пользователе и его предпочтениях (явные и очевидные из поведения);
-- поправки: где помощник ошибся и как надо было сделать;
-- способы, которые сработали на этом ПК, особенно если до них дошли не с первой попытки;
-- частые просьбы, которые стоит выполнять быстрее (например, сразу нужной программой);
-- личные команды и словечки пользователя;
-- типичные ошибки распознавания речи (что слышится вместо чего).
-
-Правила: не дублируй то, что уже есть в памяти; исправляй устаревшее; пиши кратко, по одному \
-факту в строке; файлы /memories/profile.md, preferences.md, commands.md, pc.md. Не сохраняй \
-пароли, ключи и прочие секреты. Не записывай разовые мелочи без пользы на будущее. \
-Если записывать нечего — ничего не меняй. Закончив, ответь одним словом: готово.
+REFLECT_PROMPT = """Вот память помощника и запись только что законченного разговора.
 
 <memory>
 {memory}
@@ -82,45 +55,51 @@ REFLECT_PROMPT = """Разбери разговор и обнови память
 
 <conversation>
 {conversation}
-</conversation>"""
+</conversation>
+
+Что стоит запомнить (вызывай remember для каждого факта):
+- новые факты о пользователе и его предпочтениях;
+- где помощник ошибся и как надо было сделать;
+- что сработало на этом компьютере, особенно если получилось не с первой попытки;
+- частые просьбы и личные команды пользователя;
+- как распознавание речи коверкает слова пользователя.
+
+Правила: не дублируй то, что уже есть в памяти; устаревшее удаляй через forget; один короткий \
+факт за вызов; не сохраняй пароли и секреты; разовые мелочи без пользы не записывай. \
+Если записывать нечего — ничего не вызывай. Закончив, ответь словом: готово."""
 
 
 class Brain:
     def __init__(self, cfg: Config, say: Callable[[str], None], confirm: Callable[[str], bool]):
         self.cfg = cfg
         self.say = say
-        self.client = anthropic.Anthropic(api_key=cfg.api_key) if cfg.api_key else anthropic.Anthropic()
-        self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous)
+        self.llm = LLM(cfg)
+        vision = self.llm.describe_image if cfg.vision_model else None
+        self.toolbox = ToolBox(confirm=confirm, confirm_dangerous=cfg.confirm_dangerous, vision=vision)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)
-        # Готовая реализация memory tool из SDK: файлы лежат в memory/memories.
-        self.memory = BetaLocalFilesystemMemoryTool(base_path=str(MEMORY_DIR))
-        self._memory_lock = threading.Lock()
-        self.tools = TOOLS + [
-            {"type": "web_search_20260209", "name": "web_search", "max_uses": 3},
-            self.memory.to_dict(),
-        ]
-        self.messages: list = []
+        tools = TOOLS if vision else [t for t in TOOLS if t["name"] not in VISION_TOOLS]
+        self.tools = tools + MEMORY_TOOLS
+        self.messages: list[dict] = []
         self.last_activity = 0.0
         self._reflections: list[threading.Thread] = []
 
+    def check(self) -> str | None:
+        return self.llm.check()
+
     def reset(self, learn: bool = True) -> None:
         """Начинает новый разговор; старый (если был) отдаётся на разбор в фоне."""
-        if learn and self.cfg.learning and self._has_user_text(self.messages):
-            old = self.messages
-            thread = threading.Thread(target=self._reflect_safe, args=(old,), daemon=True)
+        if learn and self.cfg.learning and any(m["role"] == "user" for m in self.messages):
+            thread = threading.Thread(target=self._reflect_safe, args=(self.messages,), daemon=True)
             thread.start()
             self._reflections = [t for t in self._reflections if t.is_alive()] + [thread]
         self.messages = []
 
     def reset_if_idle(self) -> None:
-        """Давно не общались — закрываем разговор (и учимся на нём).
-
-        Начинаем с чистого листа, а не обрезаем старую историю: так кеш и
-        блоки размышлений модели остаются валидными."""
+        """Давно не общались — закрываем разговор (и учимся на нём)."""
         if self.messages and time.time() - self.last_activity > self.cfg.idle_reset_minutes * 60:
             self.reset()
 
-    def shutdown(self, timeout: float = 60) -> None:
+    def shutdown(self, timeout: float = 120) -> None:
         """Перед выходом: разобрать текущий разговор и дождаться фоновых разборов."""
         self.reset()
         for thread in self._reflections:
@@ -133,135 +112,84 @@ class Brain:
             self.reset()
         self.last_activity = time.time()
 
-        # Время кладём в сообщение, а не в system prompt, чтобы не сбивать кеш.
         content = f"[{datetime.now():%d.%m.%Y %H:%M}] {text}"
         if not self.messages:
-            # Память подкладываем в первое сообщение разговора — так не нужен
-            # отдельный вызов memory view, и ответ приходит быстрее.
-            with self._memory_lock:
-                snapshot = memory_snapshot()
+            snapshot = memory_snapshot()
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
         try:
             self._loop()
-        except anthropic.AuthenticationError:
+        except LLMError as e:
+            print(f"[brain] {e}")
             self.reset(learn=False)
-            self.say("Не могу подключиться к Claude: неверный API-ключ.")
-        except anthropic.RateLimitError:
-            self.reset(learn=False)
-            self.say("Слишком много запросов, подождите немного.")
-        except anthropic.APIConnectionError:
-            self.reset(learn=False)
-            self.say("Нет связи с сервером. Проверьте интернет.")
-        except anthropic.APIStatusError as e:
-            self.reset(learn=False)
-            print(f"[brain] ошибка API {e.status_code}: {e.message}")
-            self.say("Сервер вернул ошибку, попробуйте ещё раз.")
+            self.say(e.spoken)
         self.last_activity = time.time()
 
     def _loop(self) -> None:
         for _ in range(MAX_STEPS):
-            response = self.client.beta.messages.create(
-                model=self.cfg.model,
-                max_tokens=16000,
-                system=self.system,
-                tools=self.tools,
-                messages=self.messages,
-                output_config={"effort": self.cfg.effort},
-                cache_control={"type": "ephemeral"},
-                # Если классификатор безопасности ошибочно откажет, сервер сам повторит
-                # запрос на рекомендованной запасной модели.
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
-
-            if response.stop_reason == "refusal":
-                self.reset(learn=False)
-                self.say("Извините, с этим я помочь не могу.")
+            reply = self.llm.chat([{"role": "system", "content": self.system}] + self.messages, self.tools)
+            self.messages.append({"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]})
+            if reply["content"]:
+                self.say(reply["content"])
+            if not reply["tool_calls"]:
+                if not reply["content"]:
+                    self.say("Готово.")
                 return
-
-            self.messages.append({"role": "assistant", "content": response.content})
-            spoken = " ".join(b.text for b in response.content if b.type == "text").strip()
-            if spoken:
-                self.say(spoken)
-
-            if response.stop_reason == "pause_turn":
-                continue  # серверный веб-поиск не успел закончить — просто продолжаем
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if not tool_uses:
-                if response.stop_reason == "max_tokens" and not spoken:
-                    self.say("Ответ получился слишком длинным, давайте попробуем проще.")
-                return
-
-            results = [self._run_tool(b) for b in tool_uses]
-            self.messages.append({"role": "user", "content": results})
-
+            for call in reply["tool_calls"]:
+                result = self._run_tool(call["name"], call["arguments"])
+                self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result})
         self.reset()
         self.say("Задача получилась слишком длинной, я остановился.")
 
-    def _run_tool(self, block) -> dict:
-        print(f"[tool] {block.name} {block.input}")
+    def _run_tool(self, name: str, args: dict) -> str:
+        print(f"[tool] {name} {args}")
         try:
-            if block.name == "memory":
-                with self._memory_lock:
-                    content = self.memory.call(block.input)
+            if name == "remember":
+                result = remember(**args)
+            elif name == "forget":
+                result = forget(**args)
             else:
-                content = self.toolbox.run(block.name, dict(block.input))
-            return {"type": "tool_result", "tool_use_id": block.id, "content": content}
-        except ToolError as e:
-            error = str(e)
-        except TypeError as e:  # неполные/лишние аргументы
-            error = f"Неверные аргументы: {e}"
+                result = self.toolbox.run(name, args)
+        except (ToolError, ValueError) as e:
+            result = f"Ошибка: {e}"
+        except TypeError as e:  # модель передала не те аргументы
+            result = f"Ошибка: неверные аргументы ({e})"
         except Exception as e:
-            error = f"{type(e).__name__}: {e}"
-        print(f"[tool] ошибка: {error}")
-        return {"type": "tool_result", "tool_use_id": block.id, "content": error, "is_error": True}
+            result = f"Ошибка: {type(e).__name__}: {e}"
+        if result.startswith("Ошибка"):
+            print(f"[tool] {result}")
+        if len(result) > TOOL_RESULT_LIMIT:
+            result = result[:TOOL_RESULT_LIMIT] + "\n...[обрезано]"
+        return result
 
     # --- самообучение -------------------------------------------------------
 
-    @staticmethod
-    def _has_user_text(messages: list) -> bool:
-        return any(m["role"] == "user" and isinstance(m["content"], str) for m in messages)
-
-    def _reflect_safe(self, messages: list) -> None:
+    def _reflect_safe(self, messages: list[dict]) -> None:
         try:
             self.reflect(messages)
         except Exception as e:  # обучение не должно ронять помощника
             print(f"[учусь] не получилось разобрать разговор: {e}")
 
-    def reflect(self, messages: list) -> None:
+    def reflect(self, messages: list[dict]) -> None:
         """Разбор законченного разговора: модель сама решает, что записать в память."""
-        with self._memory_lock:
-            snapshot = memory_snapshot()
         prompt = REFLECT_PROMPT.format(
-            memory=snapshot or "Память пока пуста.",
+            memory=memory_snapshot() or "Память пока пуста.",
             conversation=transcript(messages, self.cfg.assistant_name),
         )
-        history: list = [{"role": "user", "content": prompt}]
+        history: list[dict] = [
+            {"role": "system", "content": REFLECT_SYSTEM.format(name=self.cfg.assistant_name)},
+            {"role": "user", "content": prompt},
+        ]
         for _ in range(MAX_REFLECT_STEPS):
-            response = self.client.beta.messages.create(
-                model=self.cfg.model,
-                max_tokens=16000,
-                system=REFLECT_SYSTEM.format(name=self.cfg.assistant_name),
-                tools=[self.memory.to_dict()],
-                messages=history,
-                output_config={"effort": "low"},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
-            )
-            if response.stop_reason == "refusal":
+            reply = self.llm.chat(history, MEMORY_TOOLS)
+            history.append({"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]})
+            if not reply["tool_calls"]:
                 return
-            history.append({"role": "assistant", "content": response.content})
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if not tool_uses:
-                break
-            results = []
-            for block in tool_uses:
+            for call in reply["tool_calls"]:
                 try:
-                    with self._memory_lock:
-                        out = self.memory.call(block.input)
-                    print(f"[учусь] {block.input.get('command')} {block.input.get('path') or block.input.get('new_path', '')}")
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": out})
+                    fn = remember if call["name"] == "remember" else forget
+                    result = fn(**call["arguments"])
+                    print(f"[учусь] {call['name']}: {call['arguments']}")
                 except Exception as e:
-                    results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(e), "is_error": True})
-            history.append({"role": "user", "content": results})
+                    result = f"Ошибка: {e}"
+                history.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result})

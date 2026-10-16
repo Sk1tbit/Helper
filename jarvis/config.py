@@ -11,9 +11,16 @@ ROOT = Path(__file__).resolve().parent.parent
 
 @dataclass
 class Config:
-    api_key: str = ""
-    model: str = "claude-opus-5-5"
-    effort: str = "medium"
+    # Локальная нейросеть
+    llm_backend: str = "ollama"            # ollama | openai (LM Studio, llama.cpp и т.п.)
+    llm_url: str = "http://localhost:11434"
+    llm_api_key: str = ""                  # обычно не нужен
+    model: str = "llama3.1:8b"
+    vision_model: str = "llama3.2-vision"  # пусто = без зрения
+    num_ctx: int = 8192
+    temperature: float = 0.3
+    keep_alive: str = "30m"
+    llm_timeout: float = 180
     wake_words: list[str] = field(
         default_factory=lambda: ["джарвис", "джарвиз", "жарвис", "джервис", "джарвес", "ярвис"]
     )
@@ -47,6 +54,5 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
             if key in known and value is not None:
                 setattr(cfg, key, value)
     cfg.wake_words = [w.lower() for w in cfg.wake_words]
-    # Пустой ключ в конфиге -> SDK сам возьмёт ANTHROPIC_API_KEY из окружения.
-    cfg.api_key = cfg.api_key or os.environ.get("ANTHROPIC_API_KEY", "")
+    cfg.vision_model = cfg.vision_model or ""
     return cfg

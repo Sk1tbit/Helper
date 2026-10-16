@@ -48,7 +48,12 @@ def run_voice(cfg) -> None:
     wake = WakeWords(cfg.wake_words)
     listener.start()
     print(f"Скажите «{cfg.assistant_name}» и вашу просьбу. Ctrl+C — выход.")
-    say(f"{cfg.assistant_name} на связи.")
+    problem = brain.check()
+    if problem:
+        print(f"[!] {problem}")
+        say("Внимание: не могу достучаться до нейросети. Подробности в консоли.")
+    else:
+        say(f"{cfg.assistant_name} на связи.")
 
     try:
         while True:
@@ -92,7 +97,7 @@ def run_voice(cfg) -> None:
 
 
 def _handle_local(command: str, brain, say) -> bool:
-    """Команды, для которых не нужен Claude. True — если команда обработана."""
+    """Команды, для которых не нужна нейросеть. True — если команда обработана."""
     low = " " + re.sub(r"[^\w\s]", "", command.lower()) + " "
     if any(f" {p} " in low for p in EXIT_PHRASES):
         say("Отключаюсь. Хорошего дня.")
@@ -114,6 +119,9 @@ def run_text(cfg) -> None:
         return is_yes(input(f"{cfg.assistant_name}: {question} [да/нет] > "))
 
     brain = Brain(cfg, say=say, confirm=confirm)
+    problem = brain.check()
+    if problem:
+        print(f"[!] {problem}")
     print("Текстовый режим. Пиши просьбы, пустая строка или Ctrl+C — выход.")
     try:
         while True:

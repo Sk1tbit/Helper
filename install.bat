@@ -9,5 +9,15 @@ pip install -r requirements.txt || (pause & exit /b 1)
 python scripts\download_model.py
 if not exist config.yaml copy config.example.yaml config.yaml >nul
 echo.
-echo Готово. Впиши API-ключ в config.yaml (или задай ANTHROPIC_API_KEY) и запускай run.bat
+where ollama >nul 2>nul
+if errorlevel 1 (
+  echo Ollama не найдена. Поставь её с https://ollama.com и выполни:
+  echo   ollama pull llama3.1:8b
+  echo   ollama pull llama3.2-vision
+) else (
+  echo Качаю модели для Ollama, это надолго...
+  ollama pull llama3.1:8b
+  ollama pull llama3.2-vision
+)
+echo Готово. Запускай run.bat
 pause

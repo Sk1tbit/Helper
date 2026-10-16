@@ -1,7 +1,7 @@
 """Всё, что помогает помощнику подстраиваться под пользователя.
 
-- Память: папка memory/memories с заметками, которые Claude сам ведёт через memory tool
-  (кто пользователь, что он любит, его словечки и команды, что сработало на этом ПК).
+- Память: папка memory/memories с заметками, которые нейросеть сама ведёт инструментами
+  remember/forget (кто пользователь, что он любит, его команды, что сработало на этом ПК).
 - Снимок памяти подкладывается в начало каждого нового разговора.
 - После разговора строится его текстовая запись для «разбора полётов» (см. Brain.reflect).
 - Распознавалка часто слышит имя по-разному — новые варианты запоминаются сами.
@@ -19,7 +19,81 @@ from .config import ROOT
 MEMORY_DIR = ROOT / "memory"
 MEMORIES = MEMORY_DIR / "memories"
 WAKE_FILE = MEMORY_DIR / "wake_words.json"
-SNAPSHOT_LIMIT = 20_000  # символов памяти, которые подкладываем целиком
+SNAPSHOT_LIMIT = 8_000   # символов памяти в начале разговора (у локальных моделей контекст маленький)
+
+MEMORY_FILES = {
+    "profile": "кто пользователь, как к нему обращаться, какой стиль ответов любит",
+    "preferences": "любимые программы, сайты, музыка, привычки",
+    "commands": "личные команды пользователя и что они значат",
+    "pc": "что сработало на этом компьютере: пути к программам, команды, расположение кнопок",
+}
+
+MEMORY_TOOLS = [
+    {
+        "name": "remember",
+        "description": "Записывает факт о пользователе в долговременную память. "
+        "Файлы: " + "; ".join(f"{k} — {v}" for k, v in MEMORY_FILES.items()) + ".",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "enum": list(MEMORY_FILES)},
+                "fact": {"type": "string", "description": "Один короткий факт"},
+            },
+            "required": ["file", "fact"],
+        },
+    },
+    {
+        "name": "forget",
+        "description": "Удаляет из памяти строки, содержащие указанный текст (устаревшее или неверное).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "file": {"type": "string", "enum": list(MEMORY_FILES)},
+                "text": {"type": "string", "description": "Кусок текста удаляемой строки"},
+            },
+            "required": ["file", "text"],
+        },
+    },
+]
+
+_memory_lock = threading.Lock()
+
+
+def _memory_path(file: str) -> Path:
+    name = file.strip().lower().removesuffix(".md").split("/")[-1]
+    if name not in MEMORY_FILES:
+        raise ValueError(f"Нет такого файла памяти: {file}. Есть: {', '.join(MEMORY_FILES)}")
+    return MEMORIES / f"{name}.md"
+
+
+def remember(file: str, fact: str) -> str:
+    fact = " ".join(fact.split()).lstrip("-• ").strip()
+    if not fact:
+        raise ValueError("Пустой факт")
+    with _memory_lock:
+        path = _memory_path(file)
+        lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        if any(fact.lower() == line.lstrip("- ").strip().lower() for line in lines):
+            return "Это уже есть в памяти"
+        MEMORIES.mkdir(parents=True, exist_ok=True)
+        lines.append(f"- {fact}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f"Записано в {path.stem}"
+
+
+def forget(file: str, text: str) -> str:
+    needle = text.strip().lower()
+    if not needle:
+        raise ValueError("Пустой текст")
+    with _memory_lock:
+        path = _memory_path(file)
+        if not path.exists():
+            return "В этом файле пока ничего нет"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        kept = [line for line in lines if needle not in line.lower()]
+        path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+    removed = len(lines) - len(kept)
+    return f"Удалено строк: {removed}" if removed else "Такого в памяти не нашлось"
 
 FUZZY_THRESHOLD = 0.75   # насколько слово должно быть похоже на имя
 HITS_TO_LEARN = 2        # сколько раз услышать вариант, прежде чем запомнить навсегда
@@ -29,49 +103,37 @@ def memory_snapshot() -> str:
     """Содержимое всех файлов памяти одним текстом (или список файлов, если их много)."""
     if not MEMORIES.exists():
         return ""
-    files = sorted(p for p in MEMORIES.rglob("*") if p.is_file())
-    parts, total = [], 0
-    for path in files:
-        rel = "/memories/" + path.relative_to(MEMORIES).as_posix()
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        total += len(text)
-        parts.append(f'<file path="{rel}">\n{text.strip()}\n</file>')
-    if not parts:
-        return ""
-    if total > SNAPSHOT_LIMIT:
-        listing = "\n".join("/memories/" + p.relative_to(MEMORIES).as_posix() for p in files)
-        return f"Память большая, вот список файлов (читай нужные через memory view):\n{listing}"
-    return "\n".join(parts)
-
-
-def transcript(messages: list, assistant_name: str) -> str:
-    """Текстовая запись разговора без картинок — для разбора после его окончания."""
-    lines: list[str] = []
-    for msg in messages:
-        content = msg["content"]
-        if msg["role"] == "user":
-            if isinstance(content, str):
-                lines.append(f"Пользователь: {content.split('</memory>')[-1].strip()}")
+    parts = []
+    with _memory_lock:
+        for name in MEMORY_FILES:
+            path = MEMORIES / f"{name}.md"
+            try:
+                text = path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
                 continue
-            for block in content:
-                if block.get("type") != "tool_result":
-                    continue
-                if block.get("is_error"):
-                    lines.append(f"  [ошибка: {str(block['content'])[:300]}]")
-                elif isinstance(block["content"], str):
-                    lines.append(f"  [результат: {block['content'][:300]}]")
-                else:
-                    lines.append("  [результат: скриншот]")
-        else:
-            for block in content:
-                if block.type == "text" and block.text.strip():
-                    lines.append(f"{assistant_name}: {block.text.strip()}")
-                elif block.type == "tool_use":
-                    args = json.dumps(block.input, ensure_ascii=False)
-                    lines.append(f"  [вызов {block.name} {args[:300]}]")
+            if text:
+                parts.append(f"[{name}]\n{text}")
+    snapshot = "\n\n".join(parts)
+    if len(snapshot) > SNAPSHOT_LIMIT:
+        # Новые факты дописываются в конец файлов, поэтому при обрезке теряем самые старые.
+        snapshot = "...\n" + snapshot[-SNAPSHOT_LIMIT:]
+    return snapshot
+
+
+def transcript(messages: list[dict], assistant_name: str) -> str:
+    """Текстовая запись разговора — для разбора после его окончания."""
+    lines: list[str] = []
+    for m in messages:
+        if m["role"] == "user":
+            lines.append(f"Пользователь: {m['content'].split('</memory>')[-1].strip()}")
+        elif m["role"] == "assistant":
+            if m.get("content"):
+                lines.append(f"{assistant_name}: {m['content']}")
+            for call in m.get("tool_calls") or []:
+                args = json.dumps(call["arguments"], ensure_ascii=False)
+                lines.append(f"  [вызов {call['name']} {args[:300]}]")
+        elif m["role"] == "tool":
+            lines.append(f"  [результат: {m['content'][:300]}]")
     return "\n".join(lines)
 
 
