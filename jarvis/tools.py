@@ -410,7 +410,7 @@ class ToolBox:
         method = getattr(self, f"tool_{name}", None)
         if method is None:
             raise ToolError(f"Нет такого инструмента: {name}")
-        return method(**args)
+        return method(**_coerce_args(name, args))
 
     def _ask(self, question: str) -> None:
         if self.confirm_dangerous and not self.confirm(question):
@@ -841,3 +841,33 @@ def _human_minutes(minutes: float) -> str:
     if sec and not h:
         parts.append(f"{sec} сек")
     return " ".join(parts) or "0 сек"
+
+
+_SCHEMAS = {t["name"]: t["input_schema"].get("properties", {}) for t in TOOLS}
+
+
+def _coerce_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Маленькие модели шлют числа строкой («5»), «true» вместо true и лишние поля — чиним."""
+    props = _SCHEMAS.get(name)
+    if props is None or not isinstance(args, dict):
+        return args if isinstance(args, dict) else {}
+    out: dict[str, Any] = {}
+    for key, value in args.items():
+        if key not in props:
+            continue  # лишнее поле — выкидываем, иначе метод упадёт
+        kind = props[key].get("type")
+        try:
+            if kind == "integer" and not isinstance(value, bool):
+                value = int(round(float(value)))
+            elif kind == "number" and not isinstance(value, bool):
+                value = float(str(value).replace(",", "."))
+            elif kind == "boolean" and isinstance(value, str):
+                value = value.strip().lower() in ("true", "1", "yes", "да")
+            elif kind == "string" and not isinstance(value, str):
+                value = "" if value is None else str(value)
+            elif kind == "array" and isinstance(value, str):
+                value = [v.strip() for v in re.split(r"[+,]", value) if v.strip()]
+        except (TypeError, ValueError):
+            pass  # не смогли привести — пусть инструмент сам скажет, что не так
+        out[key] = value
+    return out

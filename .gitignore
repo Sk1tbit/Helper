@@ -10,3 +10,4 @@ memory/
 *.whl
 tools/
 logs/
+.pytest_cache/

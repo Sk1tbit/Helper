@@ -166,7 +166,8 @@ def parse_timer(t: str) -> tuple[float, str] | None:
 OPEN_RE = re.compile(r"^(открой|откройте|запусти|запустите)\s+(.+)$")
 FILLER_RE = re.compile(r"\b(пожалуйста|мне|программу|приложение|прогу)\b")
 # Это лучше отдать нейросети: тут нужно понять, что именно открывать.
-COMPLEX_RE = re.compile(r"\b(папк\w*|файл\w*|вкладк\w*|документ\w*|сайт\w*|ссылк\w*|последн\w*|где|который|которую)\b")
+COMPLEX_RE = re.compile(r"\b(папк\w*|файл\w*|вкладк\w*|документ\w*|сайт\w*|ссылк\w*|последн\w*|где|который|которую"
+                        r"|и|а потом|потом|затем|напиши|найди|включи|поставь|набери|скажи)\b")
 DOMAIN_RE = re.compile(r"^[\w-]+(\.[\w-]+)+(/\S*)?$")
 
 
@@ -197,7 +198,11 @@ def quick_command(text: str, run_tool: Callable[[str, dict], str]) -> str | None
 
     vol = VOLUME_RE.match(t)
     if vol:
-        level = parse_amount(vol.group("n"))
+        n = vol.group("n").strip()
+        level = {"максимум": 100, "максимальную": 100, "полную": 100, "минимум": 0, "ноль": 0,
+                 "половину": 50, "середину": 50}.get(n, None)
+        if level is None:
+            level = parse_amount(n)
         if level is not None and 0 <= level <= 100:
             print(f"[quick] громкость {level}%")
             try:

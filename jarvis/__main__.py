@@ -15,7 +15,7 @@ STOP_WORDS = ("стоп", "хватит", "отбой", "спасибо", "ни�
 EXIT_PHRASES = ("отключись", "выключись", "завершить работу", "заверши работу")
 RESET_PHRASES = ("новый разговор", "забудь всё", "забудь все", "начнём сначала", "начнем сначала")
 REPEAT_RE = re.compile(r"^ ?(повтори|еще раз|ещё раз|что ты сказал|не расслышал) ?$")
-HELP_RE = re.compile(r"\b(что ты умеешь|что умеешь|помощь|список команд)\b")
+HELP_RE = re.compile(r"^ ?(что ты умеешь|что умеешь|помощь|список команд|что ты можешь) ?$")
 HELP_TEXT = ("Открываю программы и сайты, рулю звуком и музыкой, ставлю напоминания, делаю скрины, "
              "выключаю и перезагружаю комп, ищу в интернете и точки в Русской Рыбалке, смотрю на экран "
              "и запоминаю, что ты любишь. Скажи «игровой режим», чтобы я не мешал в игре.")
@@ -82,7 +82,16 @@ def run_voice(cfg) -> None:
             finally:
                 hud.state(idle["state"])
 
+    def notify(text: str) -> None:
+        """Напоминания: говорим, даже если перед этим Джарвиса перебили."""
+        with speak_lock:
+            print(f"{cfg.assistant_name}: {text}")
+            hud.jarvis(text)
+            with listener.mode("barge"):
+                speaker.say(text)
+
     say = _styled(say, cfg)
+    notify = _styled(notify, cfg)
 
     def confirm(question: str) -> bool:
         say(question + (" Да или нет?" if cfg.swearing else " Скажите да или нет."))
@@ -92,7 +101,7 @@ def run_voice(cfg) -> None:
         return is_yes(answer)
 
     brain_ref: list = []
-    brain = Brain(cfg, say=say, confirm=confirm)
+    brain = Brain(cfg, say=say, confirm=confirm, notify=notify)
     brain_ref.append(brain)
     wake = WakeWords(cfg.wake_words)
     state = {"interrupted_at": 0.0}
@@ -129,6 +138,14 @@ def run_voice(cfg) -> None:
             with listener.mode("barge"):
                 if not _handle_local(command, brain, say):
                     brain.handle(command)
+        except SystemExit:
+            raise
+        except Exception:  # noqa: BLE001 — что бы ни случилось, Джарвис должен слушать дальше
+            import traceback
+
+            traceback.print_exc()
+            brain.clear_interrupt()
+            say("Что-то пошло не так. Подробности в консоли.")
         finally:
             idle["state"] = "game" if brain.game_mode else ("listen" if always else prev if prev != "think" else "wake")
             hud.state(idle["state"])

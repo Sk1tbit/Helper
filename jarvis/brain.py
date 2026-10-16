@@ -177,11 +177,12 @@ class Brain:
         if self.messages and time.time() - self.last_activity > self.cfg.idle_reset_minutes * 60:
             self.reset()
 
-    def shutdown(self, timeout: float = 120) -> None:
+    def shutdown(self, timeout: float = 60) -> None:
         """Перед выходом: разобрать текущий разговор и дождаться фоновых разборов."""
         self.reset()
+        deadline = time.time() + timeout
         for thread in self._reflections:
-            thread.join(timeout)
+            thread.join(max(0.1, deadline - time.time()))
 
     def handle(self, text: str) -> None:
         """Обрабатывает одну просьбу пользователя; всё, что надо сказать, уходит в self.say."""
@@ -226,11 +227,26 @@ class Brain:
                 self.last_activity = time.time()
                 return
         try:
-            self._loop(text)
+            try:
+                self._loop(text)
+            except LLMError as e:
+                if not e.context_overflow:
+                    raise
+                # Разговор не влез в контекст модели — начинаем заново только с этой просьбой.
+                print("[brain] разговор не влез в контекст — начинаю заново")
+                self.reset()
+                self.messages.append({"role": "user", "content": f"[{datetime.now():%d.%m.%Y %H:%M}] {text}"})
+                self._loop(text)
         except LLMError as e:
             print(f"[brain] {e}")
             self.reset(learn=False)
             self.say(e.spoken)
+        except Exception as e:  # noqa: BLE001 — кривой ответ сервера и т.п. не должен ронять помощника
+            import traceback
+
+            traceback.print_exc()
+            self.reset(learn=False)
+            self.say("Что-то пошло не так, попробуй ещё раз.")
         self.last_activity = time.time()
 
     def _run_macro(self, name: str, steps: list[str]) -> None:
@@ -245,6 +261,7 @@ class Brain:
             # Простые шаги — молча и сразу; сложные отдаём нейросети (она сама скажет, что сделала).
             if quick_command(step, self.toolbox.run) is None:
                 try:
+                    self.messages.append({"role": "user", "content": step})
                     self._loop(step)
                 except LLMError as e:
                     print(f"[macro] {step}: {e}")

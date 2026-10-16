@@ -29,6 +29,11 @@ class LLMError(Exception):
         super().__init__(message)
         self.spoken = spoken  # что сказать вслух
         self.status = status  # HTTP-код ответа сервера, если был
+        low = message.lower()
+        # Разговор длиннее, чем помещается в контекст модели (у LM Studio, Ollama, llama.cpp — разные слова).
+        self.context_overflow = "context" in low and any(
+            w in low for w in ("length", "exceed", "overflow", "too long", "window", "n_ctx", "maximum")
+        )
 
 
 THINK_RE = re.compile(r"<think>.*?</think>", re.S)
@@ -94,7 +99,10 @@ class LLM:
         ]}
         data = self._post("/v1/chat/completions", {"model": model, "messages": [msg],
                                                    "temperature": self.cfg.temperature})
-        return _clean(data["choices"][0]["message"].get("content"))
+        try:
+            return _clean(data["choices"][0]["message"].get("content"))
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
+            raise LLMError(f"В ответе сервера нет сообщения модели: {str(data)[:300]}") from e
 
     def check(self) -> str | None:
         """Проверка, что сервер жив и модели есть. Возвращает текст проблемы или None.
@@ -189,11 +197,14 @@ class LLM:
                 "options": self._options(), "keep_alive": self.cfg.keep_alive}
         if tools:
             body["tools"] = [_function_schema(t) for t in tools]
-        msg = self._post_no_think("/api/chat", body, {"think": False}).get("message", {})
+        msg = self._post_no_think("/api/chat", body, {"think": False}).get("message")
+        if not isinstance(msg, dict):
+            raise LLMError("В ответе Ollama нет сообщения модели")
         calls = [
             {"id": uuid.uuid4().hex[:12], "name": c["function"]["name"],
              "arguments": _parse_args(c["function"].get("arguments"))}
             for c in msg.get("tool_calls") or []
+            if isinstance(c, dict) and isinstance(c.get("function"), dict) and c["function"].get("name")
         ]
         return {"content": _clean(msg.get("content")), "tool_calls": calls}
 
@@ -220,11 +231,18 @@ class LLM:
             body["tools"] = [_function_schema(t) for t in tools]
         # Qwen3/3.5 и похожие: просим не «размышлять» перед ответом — так в разы быстрее.
         no_think = {"chat_template_kwargs": {"enable_thinking": False}, "reasoning_effort": "none"}
-        msg = self._post_no_think("/v1/chat/completions", body, no_think)["choices"][0]["message"]
+        data = self._post_no_think("/v1/chat/completions", body, no_think)
+        try:
+            msg = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as e:
+            raise LLMError(f"В ответе сервера нет сообщения модели: {str(data)[:300]}") from e
+        if not isinstance(msg, dict):
+            raise LLMError(f"В ответе сервера нет сообщения модели: {str(data)[:300]}")
         calls = [
             {"id": c.get("id") or uuid.uuid4().hex[:12], "name": c["function"]["name"],
              "arguments": _parse_args(c["function"].get("arguments"))}
             for c in msg.get("tool_calls") or []
+            if isinstance(c, dict) and isinstance(c.get("function"), dict) and c["function"].get("name")
         ]
         return {"content": _clean(msg.get("content")), "tool_calls": calls}
 
@@ -239,11 +257,18 @@ class LLM:
             self._no_think_ok = True
             return data
         except LLMError as e:
-            if self._no_think_ok or e.status not in (400, 422):
+            if self._no_think_ok or e.status not in (400, 422) or e.context_overflow:
                 raise
-            print(f"[llm] сервер не принял отключение размышлений ({e}); работаю без этого")
-            self._no_think_ok = False
-            return self._post(path, body)
+            first = e
+        # Сервер мог отказать как раз из-за этих полей — пробуем без них. Если и так ошибка,
+        # дело было не в них: отдаём исходную ошибку и не запоминаем «не понимает».
+        try:
+            data = self._post(path, body)
+        except LLMError:
+            raise first from None
+        print(f"[llm] сервер не принимает отключение размышлений ({first}); дальше без этого")
+        self._no_think_ok = False
+        return data
 
     def _post(self, path: str, body: dict) -> dict:
         try:
@@ -270,8 +295,16 @@ class LLM:
                 print("[!] Модель не загружена на сервере. В LM Studio: вкладка Developer → загрузи модель "
                       "и скопируй её API identifier в config.yaml (строки model и vision_model).")
                 raise LLMError(detail, "Модель не загружена в LM Studio. Загрузите её во вкладке Developer.", r.status_code)
+            if "context" in low and any(w in low for w in ("length", "exceed", "overflow", "too long", "n_ctx")):
+                raise LLMError(detail, "Разговор слишком длинный, начинаю заново.", r.status_code)
             raise LLMError(f"Ошибка нейросети ({r.status_code}): {detail}", status=r.status_code)
-        return r.json()
+        try:
+            data = r.json()
+        except ValueError as e:
+            raise LLMError(f"Сервер нейросети вернул не JSON: {r.text[:200]!r}") from e
+        if not isinstance(data, dict):
+            raise LLMError(f"Странный ответ сервера нейросети: {str(data)[:200]}")
+        return data
 
 
 def _function_schema(tool: dict) -> dict:

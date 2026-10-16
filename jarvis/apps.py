@@ -69,9 +69,11 @@ def _variants(text: str) -> set[str]:
     n = _norm(text)
     stem = _stem(n)
     out = {n, _translit(n), stem, _translit(stem)}
-    for spoken, real in _SPOKEN_STEMS.items():
-        if re.search(rf"(^| ){re.escape(spoken)}( |$)", stem):
-            out.add(re.sub(rf"(^| ){re.escape(spoken)}( |$)", rf"\g<1>{real}\g<2>", stem).strip())
+    # Разговорное название — только если сказано целиком: «телегу» -> Telegram, но «яндекс музыку»
+    # не должно превращаться в «яндекс браузер музыку».
+    real = _SPOKEN_STEMS.get(stem)
+    if real:
+        out.add(real)
     return out
 
 

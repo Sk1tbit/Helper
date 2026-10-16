@@ -53,9 +53,19 @@ def download(url: str, dest: Path | None = None) -> bytes | None:
         return None if dest else b"".join(chunks)
 
 
+# Проверенная версия: если API GitHub недоступен (лимит запросов, прокси) — качаем её напрямую.
+FALLBACK_TAG = "v1.8.2"
+FALLBACK_URL = "https://github.com/ggml-org/whisper.cpp/releases/download/{tag}/{name}"
+
+
 def pick_asset(cuda: bool) -> tuple[str, str]:
     req = urllib.request.Request(RELEASES, headers={"User-Agent": "jarvis-setup"})
-    releases = json.load(urllib.request.urlopen(req))
+    try:
+        releases = json.load(urllib.request.urlopen(req))
+    except Exception as e:  # noqa: BLE001 — сеть, лимит API, прокси
+        name = "whisper-cublas-12.4.0-bin-x64.zip" if cuda else "whisper-bin-x64.zip"
+        print(f"API GitHub недоступен ({e}) — беру проверенную версию {FALLBACK_TAG}")
+        return FALLBACK_TAG, FALLBACK_URL.format(tag=FALLBACK_TAG, name=name)
     pattern = r"whisper-cublas-12[\d.]*-bin-x64\.zip" if cuda else r"whisper-bin-x64\.zip"
     for rel in releases:  # в некоторых релизах нет сборок под Windows — берём последний, где есть
         for asset in rel.get("assets", []):
