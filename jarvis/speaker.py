@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import platform
+import threading
 import re
 import tempfile
 import time
@@ -26,9 +27,15 @@ class Speaker:
         self.cfg = cfg
         self.engine = cfg.tts_engine
         self._tmp = Path(tempfile.gettempdir()) / "jarvis_tts.mp3"
+        self._stop = threading.Event()  # выставляется, когда пользователь перебил
+
+    def stop(self) -> None:
+        """Оборвать текущую фразу (можно звать из другого потока)."""
+        self._stop.set()
 
     def say(self, text: str) -> None:
         text = clean_for_speech(text)
+        self._stop.clear()
         if not text:
             return
         if self.engine == "edge":
@@ -46,7 +53,8 @@ class Speaker:
         rate = f"{int(self.cfg.tts_rate):+d}%"
         communicate = edge_tts.Communicate(text, self.cfg.edge_voice, rate=rate)
         asyncio.run(communicate.save(str(self._tmp)))
-        _play_mp3(self._tmp)
+        if not self._stop.is_set():
+            _play_mp3(self._tmp, self._stop)
 
     def _say_sapi(self, text: str) -> None:
         import pyttsx3
@@ -60,13 +68,15 @@ class Speaker:
                 break
         if self.cfg.tts_rate:
             engine.setProperty("rate", int(self.cfg.tts_rate))
+        # Каждое слово проверяем, не перебили ли нас.
+        engine.connect("started-word", lambda *a, **k: self._stop.is_set() and engine.stop())
         engine.say(text)
         engine.runAndWait()
         engine.stop()
 
 
-def _play_mp3(path: Path) -> None:
-    """Проигрывает mp3 и ждёт окончания."""
+def _play_mp3(path: Path, stop: threading.Event) -> None:
+    """Проигрывает mp3 до конца или пока не выставят stop."""
     if platform.system() == "Windows":
         # Встроенный в Windows MCI — не нужен pygame, который не всегда ставится на свежий Python.
         import ctypes
@@ -79,8 +89,14 @@ def _play_mp3(path: Path) -> None:
             ctypes.windll.winmm.mciGetErrorStringW(err, buf, 256)
             raise RuntimeError(f"MCI: {buf.value}")
         try:
-            mci("play jarvis_tts wait", None, 0, None)
+            mci("play jarvis_tts", None, 0, None)
+            while not stop.is_set():
+                mci("status jarvis_tts mode", buf, 256, None)
+                if buf.value in ("stopped", ""):  # доиграло (или файл закрылся)
+                    break
+                time.sleep(0.05)
         finally:
+            mci("stop jarvis_tts", None, 0, None)
             mci("close jarvis_tts", None, 0, None)
         return
 
@@ -90,6 +106,7 @@ def _play_mp3(path: Path) -> None:
         pygame.mixer.init()
     pygame.mixer.music.load(str(path))
     pygame.mixer.music.play()
-    while pygame.mixer.music.get_busy():
+    while pygame.mixer.music.get_busy() and not stop.is_set():
         time.sleep(0.05)
+    pygame.mixer.music.stop()
     pygame.mixer.music.unload()

@@ -114,6 +114,7 @@ class Brain:
         self.toolbox.discord_channels = list(cfg.discord_channels or [])
         self.toolbox.discord_open_mode = cfg.discord_open_mode
         self.game_mode = False
+        self._cancel = threading.Event()  # пользователь сказал «стоп» посреди задачи
         self._normal_models = (cfg.model, cfg.vision_model)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)
         if cfg.swearing:
@@ -148,6 +149,17 @@ class Brain:
         game = f" в {self.cfg.game_name}" if self.cfg.game_name else ""
         return self.system + GAME_NOTE.format(game=game)
 
+    def interrupt(self) -> None:
+        """Бросить текущую задачу (зовётся из потока, который поймал «стоп»)."""
+        self._cancel.set()
+
+    def clear_interrupt(self) -> None:
+        self._cancel.clear()
+
+    @property
+    def interrupted(self) -> bool:
+        return self._cancel.is_set()
+
     def reset(self, learn: bool = True) -> None:
         """Начинает новый разговор; старый (если был) отдаётся на разбор в фоне."""
         if learn and self.cfg.learning and any(m["role"] == "user" for m in self.messages):
@@ -169,6 +181,7 @@ class Brain:
 
     def handle(self, text: str) -> None:
         """Обрабатывает одну просьбу пользователя; всё, что надо сказать, уходит в self.say."""
+        self._cancel.clear()
         self.reset_if_idle()
         if len(self.messages) > MAX_MESSAGES:
             self.reset()
@@ -241,8 +254,18 @@ class Brain:
         used_tools = False
         nudged = False
         for _ in range(MAX_STEPS):
+            if self._cancel.is_set():
+                print("[brain] задача прервана пользователем")
+                return
             reply = self.llm.chat([{"role": "system", "content": self._system_prompt()}] + self.messages, self.tools)
             self.messages.append({"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]})
+            if self._cancel.is_set():
+                # Пока модель думала, сказали «стоп»: ничего не делаем, но историю держим целой.
+                for call in reply["tool_calls"]:
+                    self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"],
+                                          "content": "Отменено: пользователь прервал."})
+                print("[brain] задача прервана пользователем")
+                return
             if not reply["tool_calls"]:
                 if not used_tools and not nudged and ACTION_RE.search(request):
                     # Маленькие модели любят сказать «запустил», ничего не запустив. Ловим и
@@ -260,7 +283,10 @@ class Brain:
             if reply["content"]:
                 self.say(reply["content"])
             for call in reply["tool_calls"]:
-                result = self._run_tool(call["name"], call["arguments"])
+                if self._cancel.is_set():
+                    result = "Отменено: пользователь прервал."
+                else:
+                    result = self._run_tool(call["name"], call["arguments"])
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result})
         self.reset()
         self.say("Задача получилась слишком длинной, я остановился.")

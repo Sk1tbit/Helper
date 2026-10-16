@@ -48,6 +48,14 @@ class Config:
     discord_bot_token: str = ""
     discord_channels: list = field(default_factory=list)
     discord_open_mode: str = "web"
+    # Режим «слушай»: без имени, каждая фраза — команда
+    listen_on_phrases: list = field(default_factory=lambda: ["слушай", "слушай меня", "слушай постоянно", "будь на связи"])
+    listen_off_phrases: list = field(default_factory=lambda: ["стоп", "хватит", "хватит слушать", "не слушай", "перестань слушать", "отбой"])
+    always_listen_minutes: float = 0     # через сколько минут тишины выйти из режима (0 — никогда)
+    start_listening: bool = False        # сразу после запуска слушать без имени
+    # Перебить помощника, пока он говорит или думает
+    interrupt_words: list = field(default_factory=lambda: ["стоп", "хватит", "заткнись", "замолчи", "отмена", "джарвис"])
+    interrupt_confidence: float = 0.9
     stt_engine: str = "whisper"          # whisper — точнее (если установлен), vosk — только Vosk
     whisper_model: str = "small"         # tiny / base / small / medium / large-v3-turbo
     whisper_device: str = "cpu"          # cpu — процессор (не мешает игре), cuda — видеокарта

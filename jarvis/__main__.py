@@ -6,6 +6,7 @@ import argparse
 import re
 import sys
 import threading
+import time
 
 from .config import load_config
 
@@ -19,6 +20,12 @@ HELP_TEXT = ("Открываю программы и сайты, рулю зву
              "выключаю и перезагружаю комп, ищу в интернете и точки в Русской Рыбалке, смотрю на экран "
              "и запоминаю, что ты любишь. Скажи «игровой режим», чтобы я не мешал в игре.")
 LAST_SAID = {"text": ""}
+LISTEN_ON = "Слушаю без имени. Скажи «стоп», чтобы перестал."
+LISTEN_OFF = "Окей, теперь только по имени."
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower().replace("ё", "е"))).strip()
 GAME_ON_RE = re.compile(r"\b(игровой режим|режим игры|включи игровой режим|игровой режим включи)\b")
 GAME_OFF_RE = re.compile(r"\b(обычный режим|выключи игровой режим|игровой режим выключи|выйди из игрового режима)\b")
 
@@ -57,26 +64,38 @@ def run_voice(cfg) -> None:
     speak_lock = threading.Lock()  # напоминания приходят из других потоков — не говорим хором
 
     def say(text: str) -> None:
+        if brain_ref and brain_ref[0].interrupted:
+            return  # перебили — дальше не болтаем, пока не дадут новую команду
         with speak_lock:
             print(f"{cfg.assistant_name}: {text}")
-            listener.mute()
-            try:
+            # Пока говорим, микрофон ловит только стоп-слова — чтобы можно было перебить
+            # и чтобы не распознавать собственный голос как команду.
+            with listener.mode("barge"):
                 speaker.say(text)
-            finally:
-                listener.unmute()
 
     say = _styled(say, cfg)
 
     def confirm(question: str) -> bool:
         say(question + (" Да или нет?" if cfg.swearing else " Скажите да или нет."))
-        answer = hear(timeout=7)
+        with listener.mode("listen"):
+            answer = hear(timeout=7)
         print(f"Вы: {answer or '(молчание)'}")
         return is_yes(answer)
 
+    brain_ref: list = []
     brain = Brain(cfg, say=say, confirm=confirm)
+    brain_ref.append(brain)
     wake = WakeWords(cfg.wake_words)
+    state = {"interrupted_at": 0.0}
+
+    def on_interrupt(word: str) -> None:
+        speaker.stop()
+        brain.interrupt()
+        state["interrupted_at"] = time.time()
+
+    listener.on_interrupt = on_interrupt
     listener.start()
-    print(f"Скажите «{cfg.assistant_name}» и вашу просьбу. Ctrl+C — выход.")
+    print(f"Скажите «{cfg.assistant_name}» и вашу просьбу (или «слушай» — слушать без имени). Ctrl+C — выход.")
     problem = brain.check()
     if problem:
         print(f"[!] {problem}")
@@ -84,48 +103,83 @@ def run_voice(cfg) -> None:
     else:
         say(f"{cfg.assistant_name} на связи, бля. Чё делаем?" if cfg.swearing else f"{cfg.assistant_name} на связи.")
 
+    on_phrases = {_norm(p) for p in cfg.listen_on_phrases}
+    off_phrases = {_norm(p) for p in cfg.listen_off_phrases}
+    always = bool(cfg.start_listening)   # режим «слушай»: каждая фраза — команда
+    follow_until = 0.0                    # до этого момента слушаем продолжение без имени
+    last_command = time.time()
+    if always:
+        say(LISTEN_ON)
+
+    def run(command: str) -> None:
+        # Пока выполняем, тоже можно перебить «стопом».
+        with listener.mode("barge"):
+            if not _handle_local(command, brain, say):
+                brain.handle(command)
+
     try:
         while True:
             heard = listener.next_utterance(timeout=60)
+            now = time.time()
             if heard is None:
                 brain.reset_if_idle()
+                if always and cfg.always_listen_minutes and now - last_command > cfg.always_listen_minutes * 60:
+                    always = False
+                    say(LISTEN_OFF)
                 continue
-            command = wake.strip(heard)
-            if command is None:
+
+            wake_cmd = wake.strip(heard)
+            just_interrupted = now - state["interrupted_at"] < 8
+            in_follow_up = now < follow_until
+            plain = _norm(heard)
+            addressed = wake_cmd is not None or always or just_interrupted or in_follow_up or plain in on_phrases
+            if not addressed:
                 continue
+            brain.clear_interrupt()  # новая фраза к нам — снова можно говорить
+
+            # Имя и стоп-слова ловит Vosk, а смысл фразы переслушиваем Whisper'ом.
+            text = heard
             if whisper and whisper.ready:
-                # Имя поймал Vosk, а саму команду переслушиваем Whisper'ом.
                 better = whisper.transcribe(listener.last_audio)
                 if better:
-                    better_cmd = wake.strip(better)
-                    if better_cmd is None:  # Whisper написал имя иначе — отрезаем первое слово
-                        better_cmd = " ".join(better.split()[1:]) if len(better.split()) > 1 else ""
                     print(f"[stt] vosk: {heard!r} -> whisper: {better!r}")
-                    heard, command = better, better_cmd.strip(" ,.!?")
-            print(f"Вы: {heard}")
+                    text = better
+            command = wake.strip(text)
+            if command is None:
+                if wake_cmd is not None and len(text.split()) > 1:
+                    command = " ".join(text.split()[1:])  # Whisper написал имя по-своему
+                elif wake_cmd is not None:
+                    command = ""
+                else:
+                    command = text
+            command = command.strip(" ,.!?")
+            print(f"Вы: {text}")
+            low = _norm(command) or plain
+
+            if low in on_phrases:
+                always = True
+                last_command = now
+                say(LISTEN_ON)
+                continue
+            if always and low in off_phrases:
+                always = False
+                follow_until = 0
+                say(LISTEN_OFF)
+                continue
+            if not always and in_follow_up and wake_cmd is None and low in STOP_WORDS:
+                follow_until = 0
+                say("Хорошо.")
+                continue
             if not command:
                 say("Слушаю.")
-                command = hear(timeout=8)
-                if not command:
-                    continue
-                print(f"Вы: {command}")
+                follow_until = time.time() + 8
+                continue
+            if always and len(low) < 2:
+                continue  # шорох и обрывки в режиме «слушай» не считаем командами
 
-            # Диалог: после ответа какое-то время слушаем продолжение без имени.
-            while command:
-                if _handle_local(command, brain, say):
-                    break
-                brain.handle(command)
-                if cfg.follow_up_seconds <= 0:
-                    break
-                follow = hear(timeout=cfg.follow_up_seconds)
-                if not follow:
-                    break
-                print(f"Вы: {follow}")
-                after_wake = wake.strip(follow)
-                command = after_wake if after_wake is not None else follow
-                if any(command.lower().strip(" .,!") == w for w in STOP_WORDS):
-                    say("Хорошо.")
-                    break
+            run(command)
+            last_command = time.time()
+            follow_until = 0 if always else time.time() + max(0, cfg.follow_up_seconds)
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
