@@ -393,6 +393,9 @@ class ToolBox:
         self._timers: list[tuple[float, str, threading.Timer]] = []
         self._timers_lock = threading.Lock()
         self.fishing_channels: list[str] = []
+        self.discord_token = ""
+        self.discord_channels: list = []
+        self.discord_open_mode = "web"
         # Куда открывать посты из Telegram: web — web.telegram.org, app — приложение, browser — t.me.
         self.tg_open_mode = "web"
         # Во сколько раз реальный экран больше отправленного скриншота.
@@ -550,9 +553,10 @@ class ToolBox:
     def tool_find_fishing_spot(self, target: str, water: str, open_link: bool = True) -> str:
         from .fishing import FishingSearch, describe, tg_app_link, tg_web_link
 
-        search = FishingSearch(self.fishing_channels)
+        search = FishingSearch(self.fishing_channels, discord_token=self.discord_token,
+                               discord_channels=self.discord_channels)
         hits = search.search(target, water)
-        sources = 3 + len(self.fishing_channels)
+        sources = 3 + len(self.fishing_channels) + len(search.discord_channels if search.discord_token else [])
         if not hits and len(search.errors) >= sources:
             raise ToolError("Поиск в интернете сейчас недоступен (нет связи с поисковиком и Telegram): "
                             + "; ".join(search.errors[:3]))
@@ -563,6 +567,8 @@ class ToolBox:
                 url = tg_web_link(url)
             elif "t.me/" in url and self.tg_open_mode == "app":
                 url = tg_app_link(url)
+            elif "discord.com/channels/" in url and self.discord_open_mode == "app":
+                url = url.replace("https://discord.com/", "discord://discord.com/", 1)
             webbrowser.open(url)
             report += f"\nОткрыл в браузере: {hits[0].url}"
         return report

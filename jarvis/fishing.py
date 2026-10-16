@@ -45,7 +45,7 @@ FILLER = {
 }
 COORD_RE = re.compile(r"(?<![\d:./])(\d{1,3})\s?:\s?(\d{1,3})(?![\d:./])")
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"}
-PREFERRED = ("t.me", "vk.com", "rf4game.ru", "rf4game.com", "rf4.info", "forum", "rutube.ru", "youtube.com")
+PREFERRED = ("t.me", "discord.com", "vk.com", "rf4game.ru", "rf4game.com", "rf4.info", "forum", "rutube.ru", "youtube.com")
 
 
 def _stem(word: str) -> str:
@@ -112,8 +112,17 @@ def _coords(text: str) -> list[str]:
 
 
 class FishingSearch:
-    def __init__(self, tg_channels: list[str] | None = None, timeout: float = 8):
+    def __init__(
+        self,
+        tg_channels: list[str] | None = None,
+        timeout: float = 8,
+        discord_token: str = "",
+        discord_channels: list | None = None,
+    ):
         self.channels = [c.strip().lstrip("@").replace("https://t.me/", "") for c in (tg_channels or []) if c]
+        self.discord_token = discord_token.strip()
+        # ID каналов; можно вставить и ссылку https://discord.com/channels/<сервер>/<канал>
+        self.discord_channels = [str(c).rstrip("/").split("/")[-1] for c in (discord_channels or []) if str(c).strip()]
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update(UA)
@@ -134,6 +143,49 @@ class FishingSearch:
             ):
                 text = _clean_html(body)
                 hits.append(Hit(title=f"Telegram @{post.split('/')[0]}", url=f"https://t.me/{post}", text=text))
+        return hits
+
+    def _discord(self, target: str, water: str, pages: int = 3) -> list[Hit]:
+        """Читает последние сообщения каналов Discord через бота и берёт те, где есть цель.
+
+        Нужен токен бота, добавленного на сервер, с включённым Message Content Intent.
+        Через личный аккаунт не читаем — это против правил Discord."""
+        if not self.discord_token or not self.discord_channels:
+            return []
+        api = "https://discord.com/api/v10"
+        headers = {"Authorization": f"Bot {self.discord_token}"}
+        stems = [_stem(w) for w in _norm(target).split()]
+        hits = []
+        for channel in self.discord_channels:
+            try:
+                info = self.session.get(f"{api}/channels/{channel}", headers=headers, timeout=self.timeout)
+                if info.status_code in (401, 403, 404):
+                    self.errors.append(f"Discord {channel}: нет доступа ({info.status_code})")
+                    continue
+                meta = info.json()
+                guild, name = meta.get("guild_id", "@me"), meta.get("name", channel)
+                before = None
+                for _ in range(pages):
+                    params = {"limit": 100, **({"before": before} if before else {})}
+                    r = self.session.get(f"{api}/channels/{channel}/messages", headers=headers,
+                                         params=params, timeout=self.timeout)
+                    if r.status_code == 429 or r.status_code >= 400:
+                        break
+                    messages = r.json()
+                    if not messages:
+                        break
+                    for m in messages:
+                        parts = [m.get("content", "")]
+                        for e in m.get("embeds", []):
+                            parts += [e.get("title", ""), e.get("description", "")]
+                            parts += [f"{f.get('name', '')} {f.get('value', '')}" for f in e.get("fields", [])]
+                        text = "\n".join(p for p in parts if p)
+                        if text and all(st in _norm(text) for st in stems):
+                            hits.append(Hit(title=f"Discord #{name}",
+                                            url=f"https://discord.com/channels/{guild}/{channel}/{m['id']}", text=text))
+                    before = messages[-1]["id"]
+            except (requests.RequestException, ValueError, KeyError) as e:
+                self.errors.append(f"Discord {channel}: {type(e).__name__}")
         return hits
 
     def _web(self, target: str, water: str) -> list[Hit]:
@@ -179,7 +231,7 @@ class FishingSearch:
     def search(self, target: str, water: str, fetch_pages: int = 4) -> list[Hit]:
         t_words = [_stem(w) for w in _norm(target).split()]
         w_words = [_stem(w) for w in _norm(water).split() if w not in ("река", "озеро", "море")]
-        hits = self._telegram(target, water) + self._web(target, water)
+        hits = self._telegram(target, water) + self._discord(target, water) + self._web(target, water)
 
         def score(h: Hit) -> float:
             low = _norm(f"{h.title} {h.text}")

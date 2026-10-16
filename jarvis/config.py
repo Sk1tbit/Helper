@@ -44,6 +44,9 @@ class Config:
     open_tg_in_app: bool = False
     tg_open_mode: str = "web"
     swearing: bool = False
+    discord_bot_token: str = ""
+    discord_channels: list = field(default_factory=list)
+    discord_open_mode: str = "web"
 
     @property
     def vosk_model_path(self) -> Path:

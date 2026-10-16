@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -108,6 +109,9 @@ class Brain:
                                vision=vision, notify=notify or say)
         self.toolbox.fishing_channels = list(cfg.fishing_tg_channels or [])
         self.toolbox.tg_open_mode = "app" if cfg.open_tg_in_app else cfg.tg_open_mode
+        self.toolbox.discord_token = cfg.discord_bot_token or os.environ.get("DISCORD_BOT_TOKEN", "")
+        self.toolbox.discord_channels = list(cfg.discord_channels or [])
+        self.toolbox.discord_open_mode = cfg.discord_open_mode
         self.game_mode = False
         self._normal_models = (cfg.model, cfg.vision_model)
         self.system = SYSTEM_PROMPT.format(name=cfg.assistant_name, os=SYSTEM, user=cfg.user_name)

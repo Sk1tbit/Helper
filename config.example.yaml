@@ -76,3 +76,11 @@ game_vision_model: ""
 fishing_tg_channels: []
 # Где открывать посты из Telegram: web — веб-версия web.telegram.org, app — приложение, browser — t.me.
 tg_open_mode: web
+
+# Discord-каналы с точками. Читаются через твоего бота (как его сделать — в README).
+# Токен бота можно не писать сюда, а задать переменную окружения DISCORD_BOT_TOKEN.
+discord_bot_token: ""
+# ID каналов (ПКМ по каналу → «Копировать ID») или ссылки на них.
+discord_channels: []
+# Где открывать сообщения: web — в браузере (discord.com), app — в приложении Discord.
+discord_open_mode: web
