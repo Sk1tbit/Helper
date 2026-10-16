@@ -27,6 +27,7 @@ class Config:
     tts_rate: int = 0
     confirm_dangerous: bool = True
     idle_reset_minutes: float = 10
+    learning: bool = True
 
     @property
     def vosk_model_path(self) -> Path:

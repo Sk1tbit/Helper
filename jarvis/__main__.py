@@ -21,17 +21,9 @@ def is_yes(text: str | None) -> bool:
     return any(w in YES_WORDS for w in words) and "нет" not in words
 
 
-def strip_wake_word(text: str, wake_words: list[str]) -> str | None:
-    """Возвращает текст после имени помощника, или None, если имя не прозвучало."""
-    words = text.lower().split()
-    for i, word in enumerate(words):
-        if any(word.startswith(w) for w in wake_words):
-            return " ".join(words[i + 1:]).strip(" ,.")
-    return None
-
-
 def run_voice(cfg) -> None:
     from .brain import Brain
+    from .learning import WakeWords
     from .listener import Listener
     from .speaker import Speaker
 
@@ -53,14 +45,18 @@ def run_voice(cfg) -> None:
         return is_yes(answer)
 
     brain = Brain(cfg, say=say, confirm=confirm)
+    wake = WakeWords(cfg.wake_words)
     listener.start()
     print(f"Скажите «{cfg.assistant_name}» и вашу просьбу. Ctrl+C — выход.")
     say(f"{cfg.assistant_name} на связи.")
 
     try:
         while True:
-            heard = listener.next_utterance()
-            command = strip_wake_word(heard, cfg.wake_words)
+            heard = listener.next_utterance(timeout=60)
+            if heard is None:
+                brain.reset_if_idle()
+                continue
+            command = wake.strip(heard)
             if command is None:
                 continue
             print(f"Вы: {heard}")
@@ -82,17 +78,17 @@ def run_voice(cfg) -> None:
                 if not follow:
                     break
                 print(f"Вы: {follow}")
-                after_wake = strip_wake_word(follow, cfg.wake_words)
+                after_wake = wake.strip(follow)
                 command = after_wake if after_wake is not None else follow
                 if any(command.lower().strip(" .,!") == w for w in STOP_WORDS):
                     say("Хорошо.")
                     break
-    except KeyboardInterrupt:
-        pass
-    except SystemExit:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         listener.stop()
+        print("Запоминаю, что узнал за сессию...")
+        brain.shutdown()
 
 
 def _handle_local(command: str, brain, say) -> bool:
@@ -128,6 +124,8 @@ def run_text(cfg) -> None:
                 brain.handle(text)
     except (KeyboardInterrupt, EOFError, SystemExit):
         pass
+    print("Запоминаю, что узнал за сессию...")
+    brain.shutdown()
 
 
 def main() -> None:

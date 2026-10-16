@@ -1,4 +1,4 @@
-anthropic>=0.70
+anthropic>=1.15
 vosk>=0.3.45
 sounddevice>=0.4.6
 pyttsx3>=2.90
