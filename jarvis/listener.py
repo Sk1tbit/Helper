@@ -27,6 +27,8 @@ class Listener:
         self.device = cfg.mic_device
         self.audio: queue.Queue[bytes] = queue.Queue()
         self._muted = threading.Event()
+        self._utterance = bytearray()  # звук текущей фразы — для переслушивания Whisper'ом
+        self.last_audio = b""          # звук последней распознанной фразы
         self._stream = None
 
     def start(self) -> None:
@@ -62,6 +64,7 @@ class Listener:
             except queue.Empty:
                 break
         self.rec.Reset()
+        self._utterance.clear()
         self._muted.clear()
 
     def next_utterance(self, timeout: float | None = None) -> str | None:
@@ -75,9 +78,15 @@ class Listener:
                 chunk = self.audio.get(timeout=0.25)
             except queue.Empty:
                 continue
+            self._utterance += chunk
+            if len(self._utterance) > SAMPLE_RATE * 2 * 30:  # держим не больше 30 секунд
+                del self._utterance[: len(self._utterance) - SAMPLE_RATE * 2 * 30]
             if self.rec.AcceptWaveform(chunk):
                 text = json.loads(self.rec.Result()).get("text", "").strip()
+                audio = bytes(self._utterance)
+                self._utterance.clear()
                 if text:
+                    self.last_audio = audio
                     return text
                 heard_something = False
             elif json.loads(self.rec.PartialResult()).get("partial"):

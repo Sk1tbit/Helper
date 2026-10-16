@@ -35,6 +35,17 @@ user_name: сэр
 
 # Папка с моделью Vosk (scripts/download_model.py скачает её сам).
 vosk_model: models/vosk-model-small-ru-0.22
+# Распознавание команд: whisper — нейросеть Whisper, понимает речь заметно лучше (нужен
+# pip install faster-whisper), vosk — только лёгкий Vosk. Имя «Джарвис» всегда ловит Vosk.
+stt_engine: whisper
+# small — быстро и мало памяти (~0.5 ГБ); medium — точнее; large-v3-turbo — лучшее качество (~1.6 ГБ).
+whisper_model: small
+# cpu — на процессоре: ~1 с на команду и не отнимает видеопамять у игры и нейросети.
+# cuda — на видеокарте, быстрее (нужны библиотеки CUDA; не заведётся — сам вернётся на cpu).
+whisper_device: cpu
+# int8 для cpu, int8_float16 для cuda.
+whisper_compute: int8
+
 # Номер микрофона (python -m jarvis --list-mics), null = по умолчанию.
 mic_device: null
 # Сколько секунд после ответа слушать продолжение без повторного "Джарвис".

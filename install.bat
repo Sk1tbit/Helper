@@ -38,6 +38,9 @@ if errorlevel 1 (
   exit /b 1
 )
 python scripts\download_model.py
+echo Installing Whisper for better speech recognition (optional)...
+pip install faster-whisper
+if errorlevel 1 echo [i] Whisper did not install - Jarvis will use Vosk only. Python 3.12 usually works.
 if not exist config.yaml copy config.example.yaml config.yaml >nul
 where ollama >nul 2>nul
 if errorlevel 1 (

@@ -48,6 +48,10 @@ class Config:
     discord_bot_token: str = ""
     discord_channels: list = field(default_factory=list)
     discord_open_mode: str = "web"
+    stt_engine: str = "whisper"          # whisper — точнее (если установлен), vosk — только Vosk
+    whisper_model: str = "small"         # tiny / base / small / medium / large-v3-turbo
+    whisper_device: str = "cpu"          # cpu — процессор (не мешает игре), cuda — видеокарта
+    whisper_compute: str = "int8"        # для cuda лучше int8_float16
 
     @property
     def vosk_model_path(self) -> Path:

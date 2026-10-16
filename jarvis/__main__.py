@@ -13,6 +13,12 @@ YES_WORDS = ("да", "давай", "подтверждаю", "выполняй",
 STOP_WORDS = ("стоп", "хватит", "отбой", "спасибо", "ничего", "отмена")
 EXIT_PHRASES = ("отключись", "выключись", "завершить работу", "заверши работу")
 RESET_PHRASES = ("новый разговор", "забудь всё", "забудь все", "начнём сначала", "начнем сначала")
+REPEAT_RE = re.compile(r"^ ?(повтори|еще раз|ещё раз|что ты сказал|не расслышал) ?$")
+HELP_RE = re.compile(r"\b(что ты умеешь|что умеешь|помощь|список команд)\b")
+HELP_TEXT = ("Открываю программы и сайты, рулю звуком и музыкой, ставлю напоминания, делаю скрины, "
+             "выключаю и перезагружаю комп, ищу в интернете и точки в Русской Рыбалке, смотрю на экран "
+             "и запоминаю, что ты любишь. Скажи «игровой режим», чтобы я не мешал в игре.")
+LAST_SAID = {"text": ""}
 GAME_ON_RE = re.compile(r"\b(игровой режим|режим игры|включи игровой режим|игровой режим включи)\b")
 GAME_OFF_RE = re.compile(r"\b(обычный режим|выключи игровой режим|игровой режим выключи|выйди из игрового режима)\b")
 
@@ -32,6 +38,21 @@ def run_voice(cfg) -> None:
 
     listener = Listener(cfg)
     speaker = Speaker(cfg)
+    whisper = None
+    if cfg.stt_engine == "whisper":
+        from .stt import WhisperSTT
+
+        whisper = WhisperSTT(cfg)  # грузится в фоне, пока не готов — работаем на Vosk
+
+    def hear(timeout: float | None = None) -> str | None:
+        """Следующая фраза: Vosk ловит, Whisper (если есть) переслушивает точнее."""
+        text = listener.next_utterance(timeout=timeout)
+        if text and whisper and whisper.ready:
+            better = whisper.transcribe(listener.last_audio)
+            if better:
+                print(f"[stt] vosk: {text!r} -> whisper: {better!r}")
+                return better
+        return text
 
     speak_lock = threading.Lock()  # напоминания приходят из других потоков — не говорим хором
 
@@ -48,7 +69,7 @@ def run_voice(cfg) -> None:
 
     def confirm(question: str) -> bool:
         say(question + (" Да или нет?" if cfg.swearing else " Скажите да или нет."))
-        answer = listener.next_utterance(timeout=7)
+        answer = hear(timeout=7)
         print(f"Вы: {answer or '(молчание)'}")
         return is_yes(answer)
 
@@ -72,10 +93,19 @@ def run_voice(cfg) -> None:
             command = wake.strip(heard)
             if command is None:
                 continue
+            if whisper and whisper.ready:
+                # Имя поймал Vosk, а саму команду переслушиваем Whisper'ом.
+                better = whisper.transcribe(listener.last_audio)
+                if better:
+                    better_cmd = wake.strip(better)
+                    if better_cmd is None:  # Whisper написал имя иначе — отрезаем первое слово
+                        better_cmd = " ".join(better.split()[1:]) if len(better.split()) > 1 else ""
+                    print(f"[stt] vosk: {heard!r} -> whisper: {better!r}")
+                    heard, command = better, better_cmd.strip(" ,.!?")
             print(f"Вы: {heard}")
             if not command:
                 say("Слушаю.")
-                command = listener.next_utterance(timeout=8)
+                command = hear(timeout=8)
                 if not command:
                     continue
                 print(f"Вы: {command}")
@@ -87,7 +117,7 @@ def run_voice(cfg) -> None:
                 brain.handle(command)
                 if cfg.follow_up_seconds <= 0:
                     break
-                follow = listener.next_utterance(timeout=cfg.follow_up_seconds)
+                follow = hear(timeout=cfg.follow_up_seconds)
                 if not follow:
                     break
                 print(f"Вы: {follow}")
@@ -109,7 +139,9 @@ def _styled(say, cfg):
     from .persona import phrase
 
     def styled(text: str):
-        return say(phrase(text, cfg.swearing))
+        text = phrase(text, cfg.swearing)
+        LAST_SAID["text"] = text
+        return say(text)
 
     return styled
 
@@ -123,6 +155,12 @@ def _handle_local(command: str, brain, say) -> bool:
     if any(f" {p} " in low for p in RESET_PHRASES):
         brain.reset()
         say("Начинаем с чистого листа.")
+        return True
+    if REPEAT_RE.match(low) and LAST_SAID["text"]:
+        say(LAST_SAID["text"])
+        return True
+    if HELP_RE.search(low):
+        say(HELP_TEXT + (" Короче, дохуя чего." if getattr(brain, "cfg", None) and brain.cfg.swearing else ""))
         return True
     if GAME_OFF_RE.search(low):
         say(brain.set_game_mode(False))
