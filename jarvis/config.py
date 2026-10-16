@@ -37,6 +37,9 @@ class Config:
     voice_effect: str = "jarvis"          # для piper: jarvis — «голос ИИ», none — как есть
     wake_beep: bool = True                # на «Джарвис» без команды — сигнал вместо «Слушаю»
     city: str = "Москва"                  # для погоды по умолчанию
+    hud: bool = True                      # панель на экране: что услышал, что ответил, состояние
+    hud_position: str = "bottom-right"    # bottom-right / bottom-left / top-right / top-left
+    hud_opacity: float = 0.85
     confirm_dangerous: bool = True
     confirm_power: bool = True
     idle_reset_minutes: float = 10

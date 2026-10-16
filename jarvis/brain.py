@@ -13,6 +13,7 @@ from .config import Config
 from .learning import MEMORY_TOOLS, forget, memory_snapshot, remember, transcript
 from .llm import LLM, LLMError
 from .persona import SWEAR_NOTE
+from .macros import Macros
 from .quick import quick_command
 from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError
 
@@ -115,6 +116,7 @@ class Brain:
         self.toolbox.discord_token = cfg.discord_bot_token or os.environ.get("DISCORD_BOT_TOKEN", "")
         self.toolbox.discord_channels = list(cfg.discord_channels or [])
         self.toolbox.discord_open_mode = cfg.discord_open_mode
+        self.macros = Macros()
         self.game_mode = False
         self._cancel = threading.Event()  # пользователь сказал «стоп» посреди задачи
         self._normal_models = (cfg.model, cfg.vision_model)
@@ -195,6 +197,21 @@ class Brain:
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
 
+        # Свои команды-макросы: создать / удалить / выполнить.
+        if self.cfg.quick_commands:
+            managed = self.macros.handle_management(text)
+            if managed:
+                self.messages.append({"role": "assistant", "content": managed, "tool_calls": []})
+                self.say(managed)
+                return
+            macro = self.macros.find(text)
+            if macro:
+                self.messages.append({"role": "assistant", "content": f"Выполняю команду «{macro[0]}».",
+                                      "tool_calls": []})
+                self._run_macro(*macro)
+                self.last_activity = time.time()
+                return
+
         # «вьюнок перловица» — поиск точки в РР4 без надежды на то, что модель сама вызовет инструмент.
         if self.cfg.quick_commands and self._quick_fishing(text):
             self.last_activity = time.time()
@@ -215,6 +232,24 @@ class Brain:
             self.reset(learn=False)
             self.say(e.spoken)
         self.last_activity = time.time()
+
+    def _run_macro(self, name: str, steps: list[str]) -> None:
+        self.say(f"Выполняю «{name}».")
+        failed = []
+        for step in steps:
+            if self._cancel.is_set():
+                return
+            if self.macros.find(step):  # макрос внутри самого себя — пропускаем, чтобы не зациклиться
+                continue
+            print(f"[macro] {name}: {step}")
+            # Простые шаги — молча и сразу; сложные отдаём нейросети (она сама скажет, что сделала).
+            if quick_command(step, self.toolbox.run) is None:
+                try:
+                    self._loop(step)
+                except LLMError as e:
+                    print(f"[macro] {step}: {e}")
+                    failed.append(step)
+        self.say("Готово." if not failed else f"Готово, но не вышло: {', '.join(failed)}.")
 
     def _quick_fishing(self, text: str) -> bool:
         from .fishing import parse_request

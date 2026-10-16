@@ -43,8 +43,12 @@ def run_voice(cfg) -> None:
     from .listener import Listener
     from .speaker import Speaker
 
+    from .hud import Hud
+
     listener = Listener(cfg)
     speaker = Speaker(cfg)
+    hud = Hud(cfg)
+    idle = {"state": "wake"}  # что показывать на HUD, когда ничего не происходит
     whisper = None
     if cfg.stt_engine == "whisper":
         from .stt import WhisperSTT
@@ -68,10 +72,15 @@ def run_voice(cfg) -> None:
             return  # перебили — дальше не болтаем, пока не дадут новую команду
         with speak_lock:
             print(f"{cfg.assistant_name}: {text}")
+            hud.jarvis(text)
+            hud.state("speak")
             # Пока говорим, микрофон ловит только стоп-слова — чтобы можно было перебить
             # и чтобы не распознавать собственный голос как команду.
-            with listener.mode("barge"):
-                speaker.say(text)
+            try:
+                with listener.mode("barge"):
+                    speaker.say(text)
+            finally:
+                hud.state(idle["state"])
 
     say = _styled(say, cfg)
 
@@ -113,9 +122,16 @@ def run_voice(cfg) -> None:
 
     def run(command: str) -> None:
         # Пока выполняем, тоже можно перебить «стопом».
-        with listener.mode("barge"):
-            if not _handle_local(command, brain, say):
-                brain.handle(command)
+        hud.state("think")
+        prev = idle["state"]
+        idle["state"] = "think"  # если по ходу заговорит — потом вернёмся в «думаю»
+        try:
+            with listener.mode("barge"):
+                if not _handle_local(command, brain, say):
+                    brain.handle(command)
+        finally:
+            idle["state"] = "game" if brain.game_mode else ("listen" if always else prev if prev != "think" else "wake")
+            hud.state(idle["state"])
 
     try:
         while True:
@@ -125,6 +141,7 @@ def run_voice(cfg) -> None:
                 brain.reset_if_idle()
                 if always and cfg.always_listen_minutes and now - last_command > cfg.always_listen_minutes * 60:
                     always = False
+                    idle["state"] = "wake"
                     say(LISTEN_OFF)
                 continue
 
@@ -154,15 +171,18 @@ def run_voice(cfg) -> None:
                     command = text
             command = command.strip(" ,.!?")
             print(f"Вы: {text}")
+            hud.user(text)
             low = _norm(command) or plain
 
             if low in on_phrases:
                 always = True
+                idle["state"] = "listen"
                 last_command = now
                 say(LISTEN_ON)
                 continue
             if always and low in off_phrases:
                 always = False
+                idle["state"] = "game" if brain.game_mode else "wake"
                 follow_until = 0
                 say(LISTEN_OFF)
                 continue
@@ -263,14 +283,66 @@ def run_text(cfg) -> None:
     brain.shutdown()
 
 
+class _Tee:
+    """Пишет всё, что выводится в консоль, ещё и в logs/jarvis.log — чтобы было что прислать при баге."""
+
+    def __init__(self, stream, log):
+        self.stream, self.log = stream, log
+
+    def write(self, data):
+        try:
+            self.stream.write(data)
+        except UnicodeEncodeError:
+            self.stream.write(data.encode("ascii", "replace").decode())
+        try:
+            self.log.write(data)
+            self.log.flush()
+        except (OSError, ValueError):
+            pass
+
+    def flush(self):
+        self.stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+
+def _setup_log() -> None:
+    from datetime import datetime
+
+    from .config import ROOT
+
+    logs = ROOT / "logs"
+    try:
+        logs.mkdir(exist_ok=True)
+        path = logs / "jarvis.log"
+        if path.exists() and path.stat().st_size > 5_000_000:  # не даём логу разрастись
+            path.replace(logs / "jarvis.old.log")
+        log = open(path, "a", encoding="utf-8")
+    except OSError:
+        return
+    log.write(f"\n===== {datetime.now():%d.%m.%Y %H:%M:%S} =====\n")
+    sys.stdout = _Tee(sys.stdout, log)
+    sys.stderr = _Tee(sys.stderr, log)
+
+
 def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")  # кириллица в консоли Windows
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="jarvis", description="Голосовой помощник для ПК")
     parser.add_argument("--text", action="store_true", help="текстовый режим без микрофона и голоса")
     parser.add_argument("--list-mics", action="store_true", help="показать микрофоны и выйти")
+    parser.add_argument("--doctor", action="store_true", help="проверить нейросеть, микрофон, Whisper и голос")
     parser.add_argument("--config", help="путь к config.yaml")
     args = parser.parse_args()
+    _setup_log()
+
+    if args.doctor:
+        from .doctor import run_doctor
+
+        run_doctor(load_config(args.config))
+        return
 
     if args.list_mics:
         from .listener import list_microphones
