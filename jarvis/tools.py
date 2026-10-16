@@ -10,6 +10,7 @@ import base64
 import io
 import os
 import platform
+import re
 import subprocess
 import time
 import webbrowser
@@ -71,6 +72,48 @@ APP_ALIASES = {
     "Darwin": {"браузер": "Safari", "калькулятор": "Calculator", "терминал": "Terminal"},
     "Linux": {"браузер": "xdg-open https://www.google.com", "терминал": "x-terminal-emulator"},
 }
+
+# Сервисы, которыми часто пользуются в браузере: если программы нет — открываем сайт.
+WEB_APPS = {
+    "яндекс музыка": "https://music.yandex.ru",
+    "yandex music": "https://music.yandex.ru",
+    "ютуб": "https://www.youtube.com",
+    "youtube": "https://www.youtube.com",
+    "вк": "https://vk.com",
+    "вконтакте": "https://vk.com",
+    "кинопоиск": "https://www.kinopoisk.ru",
+    "твич": "https://www.twitch.tv",
+    "twitch": "https://www.twitch.tv",
+    "яндекс почта": "https://mail.yandex.ru",
+    "гмейл": "https://mail.google.com",
+    "gmail": "https://mail.google.com",
+    "яндекс карты": "https://yandex.ru/maps",
+    "переводчик": "https://translate.yandex.ru",
+    "чат гпт": "https://chatgpt.com",
+    "chatgpt": "https://chatgpt.com",
+    "гугл диск": "https://drive.google.com",
+    "яндекс диск": "https://disk.yandex.ru",
+    "вотсап": "https://web.whatsapp.com",
+    "ватсап": "https://web.whatsapp.com",
+    "озон": "https://www.ozon.ru",
+    "вайлдберриз": "https://www.wildberries.ru",
+    "авито": "https://www.avito.ru",
+}
+
+
+def _stem(text: str) -> str:
+    """Грубо отрезает окончания, чтобы «яндекс музыку» совпало с «яндекс музыка»."""
+    words = re.sub(r"[^\w]+", " ", text.lower().replace("ё", "е")).split()
+    return " ".join(re.sub(r"[аяуюеиыйоь]+$", "", w) if len(w) > 4 else w for w in words)
+
+
+def _web_app(name: str) -> str | None:
+    stem = _stem(name)
+    for key, url in WEB_APPS.items():
+        if _stem(key) == stem:
+            return url
+    return None
+
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -325,9 +368,18 @@ class ToolBox:
             except OSError as e:
                 raise ToolError(f"Не получилось запустить {name}: {e}")
             if not launched:
+                url = _web_app(name)
+                if url:
+                    webbrowser.open(url)
+                    return f"Программы «{name}» на компьютере нет, открыл сайт {url} в браузере"
                 similar = ", ".join(apps.suggestions(name)) or "ничего похожего"
-                raise ToolError(f"Программа «{name}» не найдена. Похожие в меню Пуск: {similar}")
+                raise ToolError(f"Программа «{name}» не найдена. Похожие в меню Пуск: {similar}. "
+                                f"Если это сайт или онлайн-сервис — открой его через open_url.")
             return f"Запущено: {launched}"
+        elif _web_app(name) and not Path(target).expanduser().exists():
+            url = _web_app(name)
+            webbrowser.open(url)
+            return f"Открыл сайт {url} в браузере"
         elif SYSTEM == "Darwin":
             path = Path(target).expanduser()
             subprocess.Popen(["open", str(path)] if path.exists() else ["open", "-a", target])

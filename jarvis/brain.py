@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from datetime import datetime
@@ -17,6 +18,17 @@ MAX_MESSAGES = 40       # после этого начинаем разгово�
 MAX_REFLECT_STEPS = 10
 TOOL_RESULT_LIMIT = 3000
 
+# Просьбы, которые точно требуют действия на компьютере, а не просто ответа.
+ACTION_RE = re.compile(
+    r"\b(открой|откро|запусти|включи|выключи|закрой|сверни|разверни|поставь|найди|напиши|набери|"
+    r"нажми|громче|тише|перезагрузи|заблокируй|переключи|прокрути|скопируй|вставь|сохрани|"
+    r"пауз|следующ|предыдущ|убавь|прибавь|сделай)",
+    re.I,
+)
+NUDGE = ("[Система] Ты ответил, но не вызвал ни одного инструмента — на компьютере ничего не произошло. "
+         "Вызови нужный инструмент прямо сейчас (например open_app или open_url). "
+         "Не говори, что сделал, пока инструмент не ответил, что всё получилось.")
+
 SYSTEM_PROMPT = """Ты — {name}, голосовой помощник в стиле Джарвиса из "Железного человека". \
 Ты работаешь на компьютере пользователя ({os}) и управляешь им через инструменты. \
 Обращайся к пользователю "{user}", если в памяти не записано иначе.
@@ -29,6 +41,8 @@ SYSTEM_PROMPT = """Ты — {name}, голосовой помощник в ст�
 
 Как действовать:
 - Просят что-то сделать на компьютере — вызывай инструмент, а не объясняй, как это сделать.
+- Никогда не говори "открыл", "запустил", "сделал", если не вызвал инструмент и не получил ответ, \
+что всё получилось. Если инструмент вернул ошибку — честно скажи, что не вышло.
 - Просят подсказать с тем, что на экране, — сначала look_at_screen.
 - Чтобы кликнуть, сначала узнай координаты через look_at_screen.
 - Вопросы о фактах, новостях, погоде, курсах — web_search.
@@ -118,23 +132,35 @@ class Brain:
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
         try:
-            self._loop()
+            self._loop(text)
         except LLMError as e:
             print(f"[brain] {e}")
             self.reset(learn=False)
             self.say(e.spoken)
         self.last_activity = time.time()
 
-    def _loop(self) -> None:
+    def _loop(self, request: str) -> None:
+        used_tools = False
+        nudged = False
         for _ in range(MAX_STEPS):
             reply = self.llm.chat([{"role": "system", "content": self.system}] + self.messages, self.tools)
             self.messages.append({"role": "assistant", "content": reply["content"], "tool_calls": reply["tool_calls"]})
+            if not reply["tool_calls"]:
+                if not used_tools and not nudged and ACTION_RE.search(request):
+                    # Маленькие модели любят сказать «запустил», ничего не запустив. Ловим и
+                    # заставляем вызвать инструмент; этот ответ не озвучиваем.
+                    print(f"[brain] модель ответила без действия: {reply['content']!r} — прошу вызвать инструмент")
+                    nudged = True
+                    self.messages.append({"role": "user", "content": NUDGE})
+                    continue
+                if nudged and not used_tools:
+                    print("[brain] модель так и не вызвала инструмент. Если так часто — возьми модель "
+                          "получше с поддержкой tools (например qwen2.5 7b/14b instruct).")
+                self.say(reply["content"] or "Готово.")
+                return
+            used_tools = True
             if reply["content"]:
                 self.say(reply["content"])
-            if not reply["tool_calls"]:
-                if not reply["content"]:
-                    self.say("Готово.")
-                return
             for call in reply["tool_calls"]:
                 result = self._run_tool(call["name"], call["arguments"])
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result})
