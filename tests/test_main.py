@@ -49,14 +49,27 @@ class FakeSpeaker:
 
 class FakeBrain:
     game_mode = False
+    morning_text = None
 
     def __init__(self, cfg, say, confirm, notify=None):
         self.cfg, self.say, self.notify, self._i = cfg, say, notify, False
         FakeBrain.inst = self
         self.handled = []
+        from jarvis.summary import Recorder
+        self.recorder = Recorder()
+        self.on_event = None
 
     def check(self):
         return None
+
+    def morning(self):
+        return FakeBrain.morning_text
+
+    def note_heard(self, text):
+        if self.recorder.active:
+            self.recorder.add(text)
+            return True
+        return False
 
     def handle(self, t):
         if t == "сломайся":
@@ -102,7 +115,8 @@ def voice(monkeypatch):
     def run(script, **over):
         FakeListener.script = list(script) + ["EXIT"]
         c = Config()
-        c.stt_engine, c.follow_up_seconds, c.hud = "vosk", 0, False
+        c.stt_engine, c.follow_up_seconds, c.hud, c.panel = "vosk", 0, False, False
+        FakeBrain.morning_text = over.pop("morning", None)
         for k, v in over.items():
             setattr(c, k, v)
         M.run_voice(c)
@@ -205,3 +219,50 @@ def test_swearing_phrases():
     c.swearing = False
     say("Сделал громче.")
     assert out[-1] == "Сделал громче."
+
+
+def test_morning_summary_spoken(voice):
+    _, said = voice([], morning="Сегодня: в 18:00 тренировка.")
+    assert "Сегодня: в 18:00 тренировка." in said
+
+
+def test_unaddressed_speech_goes_to_summary(voice):
+    import jarvis.__main__ as M2
+    orig = FakeBrain.handle
+
+    def handle(self, t):
+        if t == "веди конспект":
+            self.recorder.start()
+        orig(self, t)
+    FakeBrain.handle = handle
+    try:
+        voice(["джарвис веди конспект", "обсуждаем релиз в пятницу", "петя делает тесты"])
+    finally:
+        FakeBrain.handle = orig
+    lines = FakeBrain.inst.recorder.lines
+    assert len(lines) == 2 and "петя делает тесты" in lines[1]
+
+
+def test_panel_phrase_without_panel():
+    said = []
+    M.UI["panel"] = None
+    assert M._handle_local("открой пульт", FakeBrain(Config(), said.append, None), said.append)
+    assert "Пульт выключен" in said[0]
+
+
+def test_listen_mode_during_summary_records(voice):
+    orig = FakeBrain.handle
+
+    def handle(self, t):
+        if t == "веди конспект":
+            self.recorder.start()
+        if t == "закончи конспект":
+            self.recorder.stop()
+        orig(self, t)
+    FakeBrain.handle = handle
+    try:
+        handled, _ = voice(["слушай", "веди конспект", "обсуждаем бюджет", "закончи конспект", "громче"])
+    finally:
+        FakeBrain.handle = orig
+    assert handled == ["веди конспект", "закончи конспект", "громче"]
+    assert "обсуждаем бюджет" in FakeBrain.inst.recorder.lines[0]

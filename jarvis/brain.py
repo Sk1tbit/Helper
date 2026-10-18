@@ -15,7 +15,9 @@ from .llm import LLM, LLMError
 from .persona import SWEAR_NOTE
 from .macros import Macros
 from .quick import quick_command
-from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError
+from .organizer import Organizer, quick_organizer
+from . import summary as _summary
+from .tools import SYSTEM, TOOLS, VISION_TOOLS, ToolBox, ToolError, describe_call
 
 MAX_STEPS = 15          # максимум шагов (вызовов инструментов) на одну просьбу
 MAX_MESSAGES = 40       # после этого начинаем разговор заново — у локальных моделей мало контекста
@@ -117,6 +119,10 @@ class Brain:
         self.toolbox.discord_channels = list(cfg.discord_channels or [])
         self.toolbox.discord_open_mode = cfg.discord_open_mode
         self.macros = Macros()
+        self.organizer = Organizer(notify=notify or say)
+        self.toolbox.organizer = self.organizer
+        # on_event(kind, data) — для HUD и панели: start / step / done / cancelled
+        self.on_event: Callable[[str, dict], None] | None = None
         self.game_mode = False
         self._cancel = threading.Event()  # пользователь сказал «стоп» посреди задачи
         self._normal_models = (cfg.model, cfg.vision_model)
@@ -124,13 +130,33 @@ class Brain:
         if cfg.swearing:
             self.system += SWEAR_NOTE
         tools = TOOLS if vision else [t for t in TOOLS if t["name"] not in VISION_TOOLS]
+        if cfg.ha_url and cfg.ha_token:
+            from .home import Home
+
+            self.toolbox.home = Home(cfg.ha_url, cfg.ha_token)
+        else:
+            tools = [t for t in tools if t["name"] != "smart_home"]  # меньше лишнего в подсказке модели
         self.tools = tools + MEMORY_TOOLS
+        self.recorder = _summary.Recorder()  # конспект встречи / видео
+        self.mcp = None
+        if cfg.mcp_servers or cfg.mcp_config:
+            from .config import ROOT
+            from .mcp import MCPHub, load_specs
+
+            specs = load_specs(cfg.mcp_servers, cfg.mcp_config, ROOT)
+            if specs:
+                self.mcp = MCPHub(specs)
+                self.mcp.start(on_ready=lambda extra: self.tools.extend(extra))
         self.messages: list[dict] = []
         self.last_activity = 0.0
         self._reflections: list[threading.Thread] = []
 
     def check(self) -> str | None:
         return self.llm.check()
+
+    def morning(self) -> str | None:
+        """Сводка на сегодня при запуске (события календаря) + напоминания на ближайшие события."""
+        return self.organizer.start()
 
     def set_game_mode(self, on: bool) -> str:
         """Игровой режим: короткие ответы, не лезть в игру; по желанию — лёгкая модель (game_model)."""
@@ -180,6 +206,8 @@ class Brain:
     def shutdown(self, timeout: float = 60) -> None:
         """Перед выходом: разобрать текущий разговор и дождаться фоновых разборов."""
         self.reset()
+        if self.mcp:
+            self.mcp.stop()
         deadline = time.time() + timeout
         for thread in self._reflections:
             thread.join(max(0.1, deadline - time.time()))
@@ -197,6 +225,14 @@ class Brain:
             snapshot = memory_snapshot()
             content = f"<memory>\n{snapshot or 'Память пока пуста.'}\n</memory>\n{content}"
         self.messages.append({"role": "user", "content": content})
+
+        # Конспект встречи/видео: начать, закончить, выжимка из буфера.
+        reply = self._summary_command(text)
+        if reply:
+            self.messages.append({"role": "assistant", "content": reply, "tool_calls": []})
+            self.say(reply)
+            self.last_activity = time.time()
+            return
 
         # Свои команды-макросы: создать / удалить / выполнить.
         if self.cfg.quick_commands:
@@ -218,9 +254,14 @@ class Brain:
             self.last_activity = time.time()
             return
 
-        # Простые команды («открой телеграм», «громче») — сразу, без нейросети.
+        # Простые команды («открой телеграм», «громче», «добавь задачу …») — сразу, без нейросети.
         if self.cfg.quick_commands:
-            reply = quick_command(text, self.toolbox.run)
+            reply = self._quick_home(text) or quick_command(text, self.toolbox.run)
+            if not reply:
+                try:
+                    reply = quick_organizer(text, self.organizer)
+                except ValueError as e:
+                    reply = f"Не понял: {e}."
             if reply:
                 self.messages.append({"role": "assistant", "content": reply, "tool_calls": []})
                 self.say(reply)
@@ -268,6 +309,86 @@ class Brain:
                     failed.append(step)
         self.say("Готово." if not failed else f"Готово, но не вышло: {', '.join(failed)}.")
 
+    # --- конспекты -------------------------------------------------------------
+
+    def _summary_command(self, text: str) -> str | None:
+        low = re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", text.lower().replace("ё", "е"))).strip()
+        if _summary.START_RE.match(low):
+            if self.recorder.active:
+                return "Конспект уже идёт."
+            self.recorder.start()
+            return "Веду конспект. Когда хватит — скажи «закончи конспект»."
+        if _summary.STOP_RE.match(low) and self.recorder.active:
+            return self.finish_summary()
+        if _summary.CLIPBOARD_RE.search(low):
+            try:
+                import pyperclip
+
+                from .tools import _safe_paste
+                content = _safe_paste(pyperclip) or ""
+            except Exception as e:  # noqa: BLE001 — нет буфера (Linux без xclip и т.п.)
+                print(f"[summary] буфер: {e}")
+                content = ""
+            if len(content.strip()) < 40:
+                return "В буфере нет текста для конспекта."
+            return self._summarize(content, "Конспект из буфера")
+        return None
+
+    def note_heard(self, text: str) -> bool:
+        """Фраза, сказанная не Джарвису, — в конспект (если он идёт)."""
+        if self.recorder.active:
+            self.recorder.add(text)
+            return True
+        return False
+
+    def finish_summary(self) -> str:
+        transcript_text = self.recorder.stop()
+        if len(transcript_text) < 20:
+            return "Конспект пустой — я ничего не услышал."
+        return self._summarize(transcript_text, "Конспект встречи")
+
+    def _summarize(self, text: str, title: str) -> str:
+        self.say("Секунду, делаю выжимку.")
+        self._emit("start", request=title)
+        try:
+            result = _summary.summarize(self.llm.chat, text)
+        except LLMError as e:
+            print(f"[summary] {e}")
+            path = _summary.save(text, "(выжимка не удалась)", title)
+            return f"Нейросеть не ответила, но запись сохранил в {path.name}."
+        finally:
+            self._emit("done")
+        parsed = _summary.parse_summary(result)
+        for task in parsed["задачи"][:10]:
+            try:
+                self.organizer.add_task(task)
+            except ValueError:
+                pass
+        path = _summary.save(text, result, title)
+        print(f"[summary] {path}\n{result}")
+        tasks = len(parsed["задачи"])
+        extra = f" Задач добавил: {tasks}." if tasks else ""
+        return (parsed["итог"] or "Конспект готов.") + extra + " Полностью — в памяти, папка summaries."
+
+    def _quick_home(self, text: str) -> str | None:
+        """«Включи свет в спальне» — сразу в Home Assistant, если такое устройство есть."""
+        home = self.toolbox.home
+        if home is None:
+            return None
+        m = re.match(r"^(включи|выключи|переключи)\s+(.+)$", text.lower().strip(" .!"))
+        if not m:
+            return None
+        from .home import HomeError
+
+        try:
+            if not home.find(m.group(2)):
+                return None  # не устройство — пусть разбирается обычная логика («включи музыку»)
+            action = {"включи": "on", "выключи": "off"}.get(m.group(1), "toggle")
+            return home.act(action, m.group(2)) + "."
+        except HomeError as e:
+            print(f"[home] {e}")
+            return None
+
     def _quick_fishing(self, text: str) -> bool:
         from .fishing import parse_request
 
@@ -304,9 +425,24 @@ class Brain:
         self.say(reply)
         return True
 
+    def _emit(self, kind: str, **data) -> None:
+        if self.on_event:
+            try:
+                self.on_event(kind, data)
+            except Exception as e:  # noqa: BLE001 — интерфейс не должен ломать работу
+                print(f"[brain] on_event: {e}")
+
     def _loop(self, request: str) -> None:
+        self._emit("start", request=request)
+        try:
+            self._loop_inner(request)
+        finally:
+            self._emit("cancelled" if self._cancel.is_set() else "done")
+
+    def _loop_inner(self, request: str) -> None:
         used_tools = False
         nudged = False
+        step = 0
         for _ in range(MAX_STEPS):
             if self._cancel.is_set():
                 print("[brain] задача прервана пользователем")
@@ -340,7 +476,11 @@ class Brain:
                 if self._cancel.is_set():
                     result = "Отменено: пользователь прервал."
                 else:
+                    step += 1
+                    self._emit("step", n=step, text=describe_call(call["name"], call["arguments"]))
                     result = self._run_tool(call["name"], call["arguments"])
+                    if result.startswith("Ошибка"):
+                        self._emit("step_error", n=step, text=result[:120])
                 self.messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": result})
         self.reset()
         self.say("Задача получилась слишком длинной, я остановился.")
@@ -352,6 +492,8 @@ class Brain:
                 result = remember(**args)
             elif name == "forget":
                 result = forget(**args)
+            elif self.mcp and self.mcp.has(name):
+                result = self.mcp.call(name, args)
             else:
                 result = self.toolbox.run(name, args)
         except (ToolError, ValueError) as e:

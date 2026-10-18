@@ -71,6 +71,18 @@ class Config:
     whisper_model: str = "small"         # tiny / base / small / medium / large-v3-turbo
     whisper_device: str = "cpu"          # cpu — процессор (не мешает игре), cuda — видеокарта
     whisper_compute: str = "int8"        # для cuda лучше int8_float16
+    # Пульт — веб-панель с виджетами (http://127.0.0.1:8765)
+    panel: bool = True
+    panel_port: int = 8765
+    panel_open_on_start: bool = False
+    panel_apps: list = field(default_factory=list)  # кнопки быстрого запуска (пусто — набор по умолчанию)
+    pet: bool = False                    # пиксельный питомец на рабочем столе
+    # MCP — внешние инструменты (как в Claude Desktop)
+    mcp_servers: list = field(default_factory=list)
+    mcp_config: str = ""                 # путь к mcp.json формата Claude Desktop
+    # Умный дом (Home Assistant)
+    ha_url: str = ""
+    ha_token: str = ""
 
     @property
     def vosk_model_path(self) -> Path:

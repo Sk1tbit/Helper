@@ -245,6 +245,69 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "add_task",
+        "description": "Добавляет задачу в список дел пользователя.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"],
+                         "additionalProperties": False},
+    },
+    {
+        "name": "complete_task",
+        "description": "Отмечает задачу выполненной (по части текста).",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"],
+                         "additionalProperties": False},
+    },
+    {
+        "name": "list_tasks",
+        "description": "Список текущих задач пользователя.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "add_note",
+        "description": "Сохраняет заметку пользователя.",
+        "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"],
+                         "additionalProperties": False},
+    },
+    {
+        "name": "list_notes",
+        "description": "Показывает заметки пользователя (последние 20).",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "add_event",
+        "description": "Добавляет событие в календарь. date — ГГГГ-ММ-ДД, time — ЧЧ:ММ (если известно). "
+        "Можно не указывать date, а написать дату словами в text («завтра в 18:00 тренировка»).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"text": {"type": "string"}, "date": {"type": "string"}, "time": {"type": "string"}},
+            "required": ["text"], "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_events",
+        "description": "События календаря на ближайшие дни.",
+        "input_schema": {"type": "object", "properties": {"days": {"type": "integer"}}, "additionalProperties": False},
+    },
+    {
+        "name": "delete_item",
+        "description": "Удаляет задачу, заметку или событие по части текста. kind: tasks / notes / events.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"kind": {"type": "string", "enum": ["tasks", "notes", "events"]}, "text": {"type": "string"}},
+            "required": ["kind", "text"], "additionalProperties": False,
+        },
+    },
+    {
+        "name": "smart_home",
+        "description": "Умный дом (Home Assistant): включить/выключить/переключить устройство по названию — "
+        "свет, розетку, кондиционер, шторы, сцену. action: on / off / toggle / list (list — показать устройства).",
+        "input_schema": {
+            "type": "object",
+            "properties": {"action": {"type": "string", "enum": ["on", "off", "toggle", "list"]},
+                           "name": {"type": "string", "description": "Например «свет в комнате»"}},
+            "required": ["action"], "additionalProperties": False,
+        },
+    },
+    {
         "name": "set_timer",
         "description": "Ставит напоминание: через указанное время помощник скажет вслух текст. "
         "Например «напомни через 15 минут покормить персонажа».",
@@ -397,6 +460,8 @@ class ToolBox:
         self.notify = notify or print
         self._timers: list[tuple[float, str, threading.Timer]] = []
         self._timers_lock = threading.Lock()
+        self.organizer = None  # Organizer — задачи, заметки, календарь
+        self.home = None       # Home — умный дом (Home Assistant)
         self.fishing_channels: list[str] = []
         self.discord_token = ""
         self.discord_channels: list = []
@@ -577,6 +642,60 @@ class ToolBox:
             webbrowser.open(url)
             report += f"\nОткрыл в браузере: {hits[0].url}"
         return report
+
+    # --- органайзер ------------------------------------------------------------
+
+    def _org(self):
+        if self.organizer is None:
+            raise ToolError("Органайзер не подключён")
+        return self.organizer
+
+    def tool_add_task(self, text: str) -> str:
+        return self._org().add_task(text)
+
+    def tool_complete_task(self, text: str) -> str:
+        return self._org().set_done(text)
+
+    def tool_list_tasks(self) -> str:
+        tasks = self._org().list_tasks()
+        return "\n".join(f"- {t['text']}" for t in tasks) or "Задач нет"
+
+    def tool_add_note(self, text: str) -> str:
+        return self._org().add_note(text)
+
+    def tool_list_notes(self) -> str:
+        notes = self._org().data["notes"][-20:]
+        return "\n".join(f"- {n['text']}" for n in notes) or "Заметок нет"
+
+    def tool_add_event(self, text: str, date: str = "", time: str = "") -> str:
+        return self._org().add_event(text, date or None, time or None)
+
+    def tool_list_events(self, days: int = 7) -> str:
+        from .organizer import human_date
+        from datetime import date as _date
+
+        evs = self._org().upcoming(int(days or 7))
+        return "\n".join(f"- {human_date(_date.fromisoformat(e['date']))}"
+                         f"{' ' + e['time'] if e.get('time') else ''}: {e['text']}" for e in evs) or "Событий нет"
+
+    def tool_delete_item(self, kind: str, text: str) -> str:
+        return self._org().delete(kind, text)
+
+    # --- умный дом -----------------------------------------------------------
+
+    def tool_smart_home(self, action: str, name: str = "") -> str:
+        if self.home is None:
+            raise ToolError("Умный дом не подключён: впиши ha_url и ha_token в config.yaml")
+        from .home import HomeError
+
+        try:
+            if action == "list":
+                return "\n".join(f"- {d['name']}: {d['state']}" for d in self.home.devices()) or "Устройств нет"
+            if not name:
+                raise ToolError("Какое устройство?")
+            return self.home.act(action, name)
+        except HomeError as e:
+            raise ToolError(str(e)) from e
 
     # --- напоминания и скриншоты ---------------------------------------------
 
@@ -871,3 +990,33 @@ def _coerce_args(name: str, args: dict[str, Any]) -> dict[str, Any]:
             pass  # не смогли привести — пусть инструмент сам скажет, что не так
         out[key] = value
     return out
+
+
+def describe_call(name: str, args: dict) -> str:
+    """Человеческое описание шага агента — для HUD и панели («Нажимаю (640, 700)»)."""
+    a = args or {}
+    q = lambda v, n=40: (str(v)[:n] + "…") if len(str(v)) > n else str(v)
+    return {
+        "open_app": lambda: f"Открываю {q(a.get('name', ''))}",
+        "open_url": lambda: f"Открываю {q(a.get('url', ''))}",
+        "browser_search": lambda: f"Ищу в браузере «{q(a.get('query', ''))}»",
+        "web_search": lambda: f"Ищу в интернете «{q(a.get('query', ''))}»",
+        "look_at_screen": lambda: "Смотрю на экран",
+        "mouse_click": lambda: f"Нажимаю ({a.get('x')}, {a.get('y')})",
+        "scroll": lambda: "Прокручиваю",
+        "type_text": lambda: f"Печатаю «{q(a.get('text', ''), 30)}»",
+        "press_keys": lambda: f"Жму {'+'.join(a.get('keys', []))}",
+        "media": lambda: "Звук и музыка",
+        "system_info": lambda: "Смотрю, как дела у компа",
+        "find_files": lambda: f"Ищу файлы «{q(a.get('name_part', ''))}»",
+        "run_command": lambda: f"Выполняю команду: {q(a.get('explanation') or a.get('command', ''))}",
+        "kill_process": lambda: f"Закрываю {a.get('name', '')}",
+        "power": lambda: f"Питание: {a.get('action', '')}",
+        "set_timer": lambda: f"Ставлю напоминание: {q(a.get('text', ''))}",
+        "find_fishing_spot": lambda: f"Ищу точку: {a.get('target', '')}, {a.get('water', '')}",
+        "add_task": lambda: f"Добавляю задачу «{q(a.get('text', ''))}»",
+        "add_event": lambda: f"Записываю в календарь «{q(a.get('text', ''))}»",
+        "remember": lambda: "Запоминаю",
+        "smart_home": lambda: f"Умный дом: {a.get('name', '') or 'устройства'}",
+        "save_screenshot": lambda: "Сохраняю скриншот",
+    }.get(name, lambda: (f"MCP: {name[4:]}" if name.startswith("mcp_") else name.replace("_", " ").capitalize()))()

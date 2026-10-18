@@ -49,6 +49,8 @@ WEEKDAYS = ("понедельник", "вторник", "среда", "четв�
 MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября",
           "октября", "ноября", "декабря")
 DEFAULT_CITY = {"name": "Москва"}
+RATE_RE = re.compile(r"^(?:(?:какой |скажи )?(?:курс\w*|сколько стоит)|че по|чё по|что по)\s*(?P<what>доллар\w*|бакс\w*|евро|юан\w*|тенге|фунт\w*|лир\w*|валют\w*)?(?: сегодня| сейчас)?$")
+RATE_CODES = {"доллар": "USD", "бакс": "USD", "евро": "EUR", "юан": "CNY", "тенге": "KZT", "фунт": "GBP", "лир": "TRY"}
 
 
 def info_command(t: str) -> str | None:
@@ -63,36 +65,26 @@ def info_command(t: str) -> str | None:
     m = WEATHER_RE.match(t)
     if m:
         return weather(m.group("city") or DEFAULT_CITY["name"])
+    m = RATE_RE.match(t)
+    if m and (m.group("what") or t.startswith("курс")):
+        from .rates import say_rate
+
+        what = m.group("what") or ""
+        code = next((c for k, c in RATE_CODES.items() if what.startswith(k)), None)
+        return say_rate(code)
     return None
 
 
 def weather(city: str) -> str | None:
-    """Погода с wttr.in (без ключей). Город можно в любом падеже — пробуем пару вариантов."""
-    import requests
+    """Погода голосом (wttr.in, без ключей)."""
+    from .rates import weather_data
 
-    city = city.strip()
-    # «в москве» -> «москва», «в санкт петербурге» -> «санкт-петербург»
-    words = city.split()
-    last = words[-1] if words else city
-    variants = [city, "-".join(words)]
-    if last.endswith("е") and len(last) > 3:
-        for ending in (last[:-1] + "а", last[:-1]):
-            variants += [" ".join(words[:-1] + [ending]), "-".join(words[:-1] + [ending])]
-    variants = list(dict.fromkeys(v for v in variants if v))
-    for name in variants:
-        try:
-            r = requests.get(f"https://wttr.in/{name}", params={"format": "j1", "lang": "ru"}, timeout=8)
-            data = r.json()
-            cur = data["current_condition"][0]
-        except (requests.RequestException, ValueError, KeyError, IndexError):
-            continue
-        desc = (cur.get("lang_ru") or cur.get("weatherDesc") or [{"value": ""}])[0]["value"].strip().lower()
-        temp, feels = int(cur["temp_C"]), int(cur["FeelsLikeC"])
-        wind = round(int(cur.get("windspeedKmph", 0)) / 3.6)
-        sign = lambda v: f"плюс {v}" if v > 0 else (f"минус {-v}" if v < 0 else "ноль")
-        place = name[:1].upper() + name[1:]
-        return (f"{place}: {desc}, {sign(temp)}, ощущается как {sign(feels)}, ветер {wind} метров в секунду.")
-    return None
+    w = weather_data(city)
+    if not w:
+        return None
+    sign = lambda v: f"плюс {v}" if v > 0 else (f"минус {-v}" if v < 0 else "ноль")
+    return (f"{w['city']}: {w['desc']}, {sign(w['temp'])}, ощущается как {sign(w['feels'])}, "
+            f"ветер {w['wind']} метров в секунду.")
 
 
 PC = r"(?:комп\w*|пк|ноут\w*|систем\w*)"

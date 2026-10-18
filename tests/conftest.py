@@ -19,6 +19,9 @@ def isolated_memory(tmp_path, monkeypatch):
     import jarvis.brain as brain
     import jarvis.learning as learning
     import jarvis.macros as macros
+    import jarvis.rates as rates
+
+    rates._cache.clear()  # погода/курсы из прошлого теста не должны протекать
 
     mem = tmp_path / "memory"
     monkeypatch.setattr(learning, "MEMORY_DIR", mem)

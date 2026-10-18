@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Пульт Джарвиса</title>
+<link rel="icon" href="data:,">
+<style>
+:root{--bg:#060d14;--card:rgba(18,34,48,.72);--line:rgba(54,214,255,.18);--fg:#d8f3ff;--dim:#6f95a6;
+--accent:#36d6ff;--ok:#6dff9e;--warn:#ffc94d;--bad:#ff6b7a;--r:16px}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.4 "Segoe UI",system-ui,sans-serif}
+body{background:radial-gradient(1200px 600px at 80% -10%,rgba(54,214,255,.12),transparent),
+radial-gradient(900px 500px at -10% 110%,rgba(180,140,255,.10),transparent),var(--bg);min-height:100vh}
+header{display:flex;align-items:center;gap:14px;padding:14px 20px;position:sticky;top:0;z-index:5;
+backdrop-filter:blur(14px);background:rgba(6,13,20,.7);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:.2em;color:var(--accent)}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--dim);box-shadow:0 0 12px currentColor;transition:.3s}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;flex:1}
+.tab{padding:7px 14px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--fg);cursor:pointer}
+.tab.on{background:var(--accent);color:#04121c;font-weight:600}
+button{font:inherit}
+.btn{padding:7px 12px;border-radius:10px;border:1px solid var(--line);background:rgba(54,214,255,.08);color:var(--fg);cursor:pointer}
+.btn:hover{background:rgba(54,214,255,.2)}
+.btn.stop{background:var(--bad);color:#fff;border:none;font-weight:600}
+.btn.small{padding:3px 8px;font-size:12px}
+main{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px;padding:20px;max-width:1500px;margin:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:16px;backdrop-filter:blur(10px);
+position:relative;min-height:140px;animation:in .25s ease}
+@keyframes in{from{opacity:0;transform:translateY(6px)}}
+.card h3{margin:0 0 10px;font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim);font-weight:600}
+.card.wide{grid-column:span 2}
+@media(max-width:700px){.card.wide{grid-column:span 1}main{padding:12px}}
+.x{position:absolute;top:10px;right:10px;display:none}
+.edit .x{display:block}
+.big{font-size:44px;font-weight:300;letter-spacing:.02em}
+.muted{color:var(--dim)}
+ul{list-style:none;margin:0;padding:0;max-height:260px;overflow:auto}
+li{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+li .grow{flex:1;word-break:break-word}
+li.done .grow{text-decoration:line-through;color:var(--dim)}
+.del{opacity:0;cursor:pointer;color:var(--dim);background:none;border:none}
+li:hover .del{opacity:1}
+input[type=text],input[type=date],input[type=time]{background:rgba(0,0,0,.3);border:1px solid var(--line);color:var(--fg);
+border-radius:10px;padding:8px 10px;font:inherit;min-width:0}
+.row{display:flex;gap:6px;margin-top:10px}.row input{flex:1}
+.rate{display:flex;justify-content:space-between;padding:5px 0}
+.up{color:var(--ok)}.down{color:var(--bad)}
+.bar{height:6px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden;margin:4px 0 10px}
+.bar i{display:block;height:100%;background:var(--accent);transition:width .6s}
+.chat{height:260px;overflow:auto;display:flex;flex-direction:column;gap:6px}
+.msg{padding:7px 11px;border-radius:12px;max-width:85%;word-break:break-word}
+.msg.you{align-self:flex-end;background:rgba(54,214,255,.18)}
+.msg.jarvis{align-self:flex-start;background:rgba(255,255,255,.06)}
+.step{display:flex;gap:8px;padding:4px 0}.step b{color:var(--accent);min-width:58px}.step.err{color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:8px}
+.orb{width:150px;height:150px;margin:10px auto;border-radius:50%;position:relative;
+background:radial-gradient(circle,#bff4ff 0,#36d6ff 18%,rgba(54,214,255,.15) 45%,transparent 70%);
+animation:pulse 3s ease-in-out infinite;transition:filter .3s}
+.orb:before,.orb:after{content:"";position:absolute;inset:8px;border-radius:50%;border:2px dashed rgba(54,214,255,.5);animation:spin 12s linear infinite}
+.orb:after{inset:26px;border-style:dotted;animation-duration:7s;animation-direction:reverse}
+.orb.think{filter:hue-rotate(-150deg)}.orb.speak{animation-duration:.6s}.orb.game{filter:hue-rotate(70deg)}
+@keyframes pulse{50%{transform:scale(1.06)}}@keyframes spin{to{transform:rotate(360deg)}}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:9;padding:16px}
+.modal.on{display:flex}
+.sheet{background:#0c1a26;border:1px solid var(--line);border-radius:var(--r);padding:20px;max-width:640px;width:100%;max-height:90vh;overflow:auto}
+.tpl{padding:14px;border:1px solid var(--line);border-radius:12px;cursor:pointer;text-align:center}
+.tpl:hover{border-color:var(--accent)}
+.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#12324a;padding:10px 16px;border-radius:12px;
+border:1px solid var(--line);opacity:0;transition:.3s;pointer-events:none;max-width:90vw}
+.toast.on{opacity:1}
+.rec{color:var(--bad);font-weight:600;display:none}.rec.on{display:inline}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo"><span class="dot" id="dot"></span><span id="name">ДЖАРВИС</span></div>
+  <span class="muted" id="stateText">жду имя</span><span class="rec" id="rec">● конспект</span>
+  <nav class="tabs" id="tabs"></nav>
+  <button class="btn" id="editBtn" title="Убрать и добавить виджеты">Изменить</button>
+  <button class="btn" id="addDesk" title="Новый стол из шаблона">+ Стол</button>
+</header>
+<main id="board"></main>
+
+<div class="modal" id="tplModal"><div class="sheet">
+  <h3>Новый стол</h3>
+  <div class="row"><input type="text" id="deskName" placeholder="Название (по умолчанию — как шаблон)"></div>
+  <p class="muted">Шаблон:</p><div class="grid" id="tplGrid"></div>
+  <div class="row" style="justify-content:flex-end"><button class="btn" data-close>Отмена</button></div>
+</div></div>
+<div class="modal" id="addModal"><div class="sheet">
+  <h3>Добавить виджет</h3><div class="grid" id="wGrid"></div>
+  <div class="row" style="justify-content:space-between">
+    <button class="btn" id="renameDesk">Переименовать стол</button>
+    <button class="btn" id="delDesk">Удалить стол</button>
+    <button class="btn" data-close>Готово</button></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v; else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== false && v != null) el.setAttribute(k, v);
+  }
+  for (const k of kids.flat()) if (k != null) el.append(k.nodeType ? k : document.createTextNode(String(k)));
+  return el;
+};
+const STATES = {wake:["#4f7a8c","жду имя"],listen:["#36d6ff","слушаю"],think:["#ffc94d","думаю"],
+  speak:["#6dff9e","говорю"],game:["#b48cff","игровой режим"]};
+let desks = [], templates = {}, widgetNames = {}, current = null, editing = false;
+let data = {}, chat = [], since = 0, agent = {steps: []}, jstate = "wake";
+try { current = localStorage.getItem("desk"); } catch (e) {}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) { toast(j.error || "Ошибка " + r.status); throw new Error(j.error); }
+  if (j.msg) toast(j.msg);
+  return j;
+}
+function toast(t) { const el = $("#toast"); el.textContent = t; el.classList.add("on"); clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("on"), 2600); }
+const desk = () => desks.find(d => d.id === current) || desks[0];
+const saveDesks = () => api("/api/desks", {desks}).then(j => { desks = j.desks; });
+
+function renderTabs() {
+  const nav = $("#tabs"); nav.replaceChildren();
+  for (const d of desks) nav.append(h("button", {class: "tab" + (d === desk() ? " on" : ""), onclick: () => {
+    current = d.id; try { localStorage.setItem("desk", d.id); } catch (e) {} render(); }}, d.name));
+}
+const W = {
+  clock(c) { const now = new Date();
+    c.append(h("div", {class: "big"}, now.toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"})),
+      h("div", {class: "muted"}, now.toLocaleDateString("ru-RU", {weekday: "long", day: "numeric", month: "long"}))); },
+  weather(c) { const w = data.weather;
+    if (!w) return c.append(h("div", {class: "muted"}, "Нет данных (нет сети?)"));
+    c.append(h("div", {class: "big"}, (w.temp > 0 ? "+" : "") + w.temp + "°"), h("div", {}, w.city + " · " + w.desc),
+      h("div", {class: "muted"}, "Ощущается " + w.feels + "°, ветер " + w.wind + " м/с")); },
+  rates(c) { const r = data.rates;
+    if (!r) return c.append(h("div", {class: "muted"}, "Нет данных ЦБ"));
+    for (const code of ["USD", "EUR", "CNY", "KZT"]) if (r[code]) { const x = r[code];
+      c.append(h("div", {class: "rate"}, h("span", {}, (x.nominal > 1 ? x.nominal + " " : "") + code),
+        h("span", {}, x.value.toFixed(2) + " ₽ ", h("small", {class: x.change >= 0 ? "up" : "down"},
+          (x.change >= 0 ? "▲" : "▼") + Math.abs(x.change).toFixed(2))))); } },
+  tasks(c) { const ul = h("ul");
+    for (const t of (data.tasks || []).slice().sort((a, b) => a.done - b.done)) {
+      const cb = h("input", {type: "checkbox", onchange: () => api("/api/task/done", {id: t.id, done: cb.checked}).then(load)});
+      cb.checked = t.done;
+      ul.append(h("li", {class: t.done ? "done" : ""}, cb, h("span", {class: "grow"}, t.text),
+        h("button", {class: "del", title: "Удалить", onclick: () => api("/api/delete", {kind: "tasks", id: t.id}).then(load)}, "✕")));
+    }
+    if (!ul.children.length) ul.append(h("li", {class: "muted"}, "Задач нет — красота"));
+    c.append(ul, adder("Новая задача", t => api("/api/task", {text: t}))); },
+  notes(c) { const ul = h("ul");
+    for (const n of data.notes || []) ul.append(h("li", {}, h("span", {class: "grow"}, n.text),
+      h("button", {class: "del", onclick: () => api("/api/delete", {kind: "notes", id: n.id}).then(load)}, "✕")));
+    if (!ul.children.length) ul.append(h("li", {class: "muted"}, "Заметок пока нет"));
+    c.append(ul, adder("Заметка", t => api("/api/note", {text: t}))); },
+  calendar(c) { const ul = h("ul");
+    for (const e of data.events || []) ul.append(h("li", {}, h("b", {style: "min-width:90px"}, e.human + (e.time ? " " + e.time : "")),
+      h("span", {class: "grow"}, e.text), h("button", {class: "del", onclick: () => api("/api/delete", {kind: "events", id: e.id}).then(load)}, "✕")));
+    if (!ul.children.length) ul.append(h("li", {class: "muted"}, "На месяц вперёд пусто"));
+    const d = h("input", {type: "date"}), tm = h("input", {type: "time"}), tx = h("input", {type: "text", placeholder: "Событие"});
+    d.value = new Date().toISOString().slice(0, 10);
+    c.append(ul, h("div", {class: "row"}, d, tm), h("div", {class: "row"}, tx, h("button", {class: "btn", onclick: () => {
+      if (tx.value.trim()) api("/api/event", {text: tx.value, date: d.value, time: tm.value}).then(load); }}, "+"))); },
+  system(c) { const s = data.system;
+    if (!s) return c.append(h("div", {class: "muted"}, "Нет данных"));
+    const bar = (label, v) => [h("div", {}, label + ": " + Math.round(v) + "%"), h("div", {class: "bar"}, h("i", {style: "width:" + v + "%"}))];
+    c.append(...bar("Процессор", s.cpu), ...bar("Память " + s.ram_used + " из " + s.ram_total + " ГБ", s.ram));
+    if (s.battery != null) c.append(...bar("Батарея", s.battery)); },
+  agent(c) {
+    c.append(h("div", {class: "muted"}, agent.request ? "«" + agent.request + "» — " + agent.status : "Агент ждёт задачу"));
+    const box = h("div", {style: "margin:8px 0;max-height:200px;overflow:auto"});
+    agent.steps.forEach((s, i) => box.append(h("div", {class: "step" + (s.error ? " err" : "")},
+      h("b", {}, "Шаг " + s.n), h("span", {}, s.text + (agent.active && i === agent.steps.length - 1 ? "…" : "")))));
+    c.append(box, h("button", {class: "btn stop", disabled: agent.active ? null : "", onclick: () => api("/api/stop", {})}, "■ Стоп")); },
+  chat(c) { c.classList.add("wide");
+    const box = h("div", {class: "chat", id: "chatBox"});
+    for (const m of chat.slice(-80)) box.append(h("div", {class: "msg " + m.who, title: m.t}, m.text));
+    c.append(box, adder("Напиши Джарвису…", t => api("/api/say", {text: t}), "➤"));
+    requestAnimationFrame(() => box.scrollTop = box.scrollHeight); },
+  apps(c) { const g = h("div", {class: "grid"});
+    for (const a of data.apps || []) g.append(h("button", {class: "btn", onclick: () => api("/api/open", {text: a})}, a));
+    c.append(g, adder("Открыть…", t => api("/api/open", {text: t}))); },
+  media(c) { const b = (t, a) => h("button", {class: "btn", onclick: () => api("/api/media", {action: a})}, t);
+    c.append(h("div", {class: "grid"}, b("⏮", "prev"), b("⏯", "play"), b("⏭", "next"), b("🔉", "down"), b("🔊", "up"), b("🔇", "mute"))); },
+  home(c) { const hm = data.home;
+    if (!hm) return c.append(h("div", {class: "muted"}, "Умный дом не подключён: впиши ha_url и ha_token в config.yaml"));
+    if (hm.error) return c.append(h("div", {class: "down"}, hm.error));
+    const g = h("div", {class: "grid"});
+    for (const d of hm) g.append(h("button", {class: "btn", style: d.state === "on" ? "border-color:var(--ok)" : "",
+      onclick: () => api("/api/home", {text: d.id}).then(() => setTimeout(load, 700))}, d.name, h("br"), h("small", {class: "muted"}, d.state)));
+    c.append(g); },
+  fishing(c) { const f = h("input", {type: "text", placeholder: "Рыба (перловица)"}), w = h("input", {type: "text", placeholder: "Водоём (Вьюнок)"});
+    c.append(h("div", {class: "muted"}, "Поиск точек по ТГ-каналам"), h("div", {class: "row"}, f), h("div", {class: "row"}, w,
+      h("button", {class: "btn", onclick: () => { if (f.value && w.value) api("/api/say", {text: w.value + " " + f.value}); }}, "Найти"))); },
+  avatar(c) { c.append(h("div", {class: "orb " + jstate}), h("div", {class: "muted", style: "text-align:center"}, (STATES[jstate] || STATES.wake)[1])); },
+};
+function adder(ph, fn, label = "+") {
+  const inp = h("input", {type: "text", placeholder: ph});
+  const go = () => { const t = inp.value.trim(); if (!t) return; inp.value = ""; fn(t).then(load).catch(() => {}); };
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  return h("div", {class: "row"}, inp, h("button", {class: "btn", onclick: go}, label));
+}
+function render() {
+  renderTabs();
+  const board = $("#board"), d = desk();
+  const focused = document.activeElement && document.activeElement.closest(".card");
+  if (focused && document.activeElement.value) return;  // не мешаем печатать
+  board.classList.toggle("edit", editing); board.replaceChildren();
+  if (!d) return;
+  d.widgets.forEach((w, i) => {
+    if (!W[w]) return;
+    const c = h("section", {class: "card", "data-w": w}, h("h3", {}, widgetNames[w] || w),
+      h("button", {class: "btn small x", onclick: () => { d.widgets.splice(i, 1); saveDesks().then(render); }}, "убрать"));
+    try { W[w](c); } catch (e) { c.append(h("div", {class: "down"}, String(e))); }
+    board.append(c);
+  });
+  if (!d.widgets.length) board.append(h("section", {class: "card"}, h("h3", {}, "Пустой стол"),
+    h("p", {class: "muted"}, "Нажми «Изменить», чтобы добавить виджеты.")));
+  if (editing) board.append(h("section", {class: "card", style: "display:flex;align-items:center;justify-content:center;cursor:pointer",
+    onclick: openAdd}, h("span", {class: "big"}, "+")));
+}
+function openAdd() {
+  const g = $("#wGrid"); g.replaceChildren();
+  for (const [k, v] of Object.entries(widgetNames)) g.append(h("div", {class: "tpl", onclick: () => {
+    desk().widgets.push(k); saveDesks().then(render); toast("Добавил: " + v); }}, v));
+  $("#addModal").classList.add("on");
+}
+$("#editBtn").onclick = () => { editing = !editing; $("#editBtn").textContent = editing ? "Готово" : "Изменить"; render(); };
+$("#addDesk").onclick = () => {
+  const g = $("#tplGrid"); g.replaceChildren();
+  for (const [name, ws] of Object.entries(templates)) g.append(h("div", {class: "tpl", onclick: () => {
+    const id = Math.random().toString(36).slice(2, 10);
+    desks.push({id, name: $("#deskName").value.trim() || name, widgets: ws.slice()});
+    current = id; $("#deskName").value = ""; $("#tplModal").classList.remove("on"); saveDesks().then(render);
+  }}, h("b", {}, name), h("div", {class: "muted"}, ws.map(w => widgetNames[w]).join(", ") || "ничего")));
+  $("#tplModal").classList.add("on");
+};
+$("#renameDesk").onclick = () => { const n = prompt("Название стола", desk().name); if (n) { desk().name = n; saveDesks().then(render); } };
+$("#delDesk").onclick = () => {
+  if (desks.length < 2) return toast("Последний стол не удаляю");
+  if (!confirm("Удалить стол «" + desk().name + "»?")) return;
+  desks = desks.filter(d => d !== desk()); current = desks[0].id; $("#addModal").classList.remove("on"); saveDesks().then(render);
+};
+document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest(".modal").classList.remove("on"));
+
+async function load() { try { data = await (await fetch("/api/widgets")).json(); render(); } catch (e) {} }
+async function poll() {
+  try {
+    const s = await (await fetch("/api/state?since=" + since)).json();
+    let changed = false;
+    if (s.chat.length) { chat.push(...s.chat); since = s.chat[s.chat.length - 1].n; changed = true; if (chat.length > 200) chat = chat.slice(-200); }
+    if (JSON.stringify(s.agent) !== JSON.stringify(agent)) { agent = s.agent; changed = true; }
+    if (s.state !== jstate) { jstate = s.state; changed = true; }
+    const [color, label] = STATES[jstate] || STATES.wake;
+    $("#dot").style.background = color; $("#dot").style.color = color; $("#stateText").textContent = label;
+    $("#name").textContent = s.name.toUpperCase(); $("#rec").classList.toggle("on", s.recording);
+    if (changed) { if (s.chat.some(m => m.who === "jarvis")) load(); else render(); }
+  } catch (e) { $("#stateText").textContent = "нет связи с Джарвисом"; }
+  setTimeout(poll, 1000);
+}
+(async () => {
+  const j = await (await fetch("/api/desks")).json();
+  desks = j.desks; templates = j.templates; widgetNames = j.widgets;
+  if (!desks.some(d => d.id === current)) current = desks[0] && desks[0].id;
+  await load(); poll();
+  setInterval(load, 60000);
+  setInterval(render, 15000);  // часы
+})();
+</script>
+</body>
+</html>

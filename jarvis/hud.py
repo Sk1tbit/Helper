@@ -4,6 +4,7 @@
 Работает в своём потоке на tkinter (входит в Python для Windows). Если tkinter нет — молча
 ничего не делает. Панель можно перетащить мышкой, двойной клик — свернуть/развернуть.
 Поверх игр в полноэкранном режиме Windows её не покажет — только в оконном/«без рамки».
+Пока агент работает, показывает «Шаг N: …» и кнопку «■ стоп». Здесь же живёт питомец (pet: true).
 """
 
 from __future__ import annotations
@@ -26,7 +27,9 @@ STATES = {
 class Hud:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.enabled = cfg.hud
+        self.enabled = cfg.hud or getattr(cfg, "pet", False)
+        self.on_stop = None   # кнопка «стоп» на HUD
+        self.on_open = None   # двойной клик по питомцу — открыть пульт
         self._q: queue.Queue = queue.Queue()
         if self.enabled:
             threading.Thread(target=self._run, daemon=True).start()
@@ -44,6 +47,11 @@ class Hud:
     def jarvis(self, text: str) -> None:
         if self.enabled:
             self._q.put(("jarvis", text))
+
+    def step(self, text: str | None) -> None:
+        """Шаг агента («Шаг 2: Нажимаю …») или None — задача закончена."""
+        if self.enabled:
+            self._q.put(("step", text))
 
     # --- поток tkinter ------------------------------------------------------
 
@@ -81,6 +89,24 @@ class Hud:
         him = tk.Label(body, text="", fg=COLORS["fg"], bg=COLORS["bg"], font=("Segoe UI", 10),
                        wraplength=width - 20, justify="left", anchor="w")
         him.pack(fill="x")
+        steps = tk.Frame(body, bg=COLORS["bg"])
+        step_label = tk.Label(steps, text="", fg="#ffc94d", bg=COLORS["bg"], font=("Segoe UI", 9),
+                              wraplength=width - 90, justify="left", anchor="w")
+        step_label.pack(side="left", fill="x", expand=True)
+        stop_btn = tk.Label(steps, text="■ стоп", fg="#ffffff", bg="#c8394a", font=("Segoe UI", 9, "bold"),
+                            padx=8, pady=1, cursor="hand2")
+        stop_btn.pack(side="right")
+        stop_btn.bind("<Button-1>", lambda e: (self.on_stop and self.on_stop(), "break")[1])
+        pet = None
+        if getattr(self.cfg, "pet", False):
+            try:
+                from .pet import Pet
+
+                pet = Pet(root, on_open=lambda: self.on_open and self.on_open())
+            except Exception as e:  # noqa: BLE001
+                print(f"[pet] не запустился: {e}")
+        if not self.cfg.hud:
+            root.withdraw()  # только питомец
 
         root.update_idletasks()
         sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
@@ -131,10 +157,20 @@ class Hud:
                         mark, color, label = STATES.get(value, STATES["wake"])
                         dot.configure(text=mark, fg=color)
                         title.configure(text=f"{self.cfg.assistant_name.upper()}  ·  {label}")
+                        if pet:
+                            pet.set_state(value)
                     elif kind == "user":
                         you.configure(text=f"Вы: {short(value)}")
                     elif kind == "jarvis":
                         him.configure(text=short(value, 240))
+                        if pet:
+                            pet.say(value)
+                    elif kind == "step":
+                        if value:
+                            step_label.configure(text=short(value, 90))
+                            steps.pack(fill="x", pady=(4, 0))
+                        else:
+                            steps.pack_forget()
                     fit()
             except queue.Empty:
                 pass

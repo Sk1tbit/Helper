@@ -9,6 +9,7 @@ import threading
 import time
 
 from .config import load_config
+from .summary import STOP_RE as STOP_SUMMARY_RE
 
 YES_WORDS = ("да", "давай", "подтверждаю", "выполняй", "конечно", "ок", "окей", "делай", "можно", "ага")
 STOP_WORDS = ("стоп", "хватит", "отбой", "спасибо", "ничего", "отмена")
@@ -18,8 +19,11 @@ REPEAT_RE = re.compile(r"^ ?(повтори|еще раз|ещё раз|что �
 HELP_RE = re.compile(r"^ ?(что ты умеешь|что умеешь|помощь|список команд|что ты можешь) ?$")
 HELP_TEXT = ("Открываю программы и сайты, рулю звуком и музыкой, ставлю напоминания, делаю скрины, "
              "выключаю и перезагружаю комп, ищу в интернете и точки в Русской Рыбалке, смотрю на экран "
-             "и запоминаю, что ты любишь. Скажи «игровой режим», чтобы я не мешал в игре.")
+             "и запоминаю, что ты любишь. Веду задачи, заметки и календарь, говорю курс и погоду, "
+             "делаю конспект встреч. Скажи «открой пульт» — покажу панель, «игровой режим» — не буду мешать в игре.")
+PANEL_RE = re.compile(r"^ ?(открой|покажи|запусти) (панель|пульт|дашборд|виджеты|рабочий стол джарвиса) ?$")
 LAST_SAID = {"text": ""}
+UI: dict = {"panel": None}  # пульт, если запущен
 LISTEN_ON = "Слушаю без имени. Скажи «стоп», чтобы перестал."
 LISTEN_OFF = "Окей, теперь только по имени."
 
@@ -35,6 +39,35 @@ def is_yes(text: str | None) -> bool:
         return False
     words = text.lower().split()
     return any(w in YES_WORDS for w in words) and "нет" not in words
+
+
+def _attach_ui(cfg, brain, run, stop, hud=None):
+    """Пульт и HUD получают шаги агента; возвращает Panel или None."""
+    panel = None
+    if cfg.panel:
+        from .panel import Panel
+
+        panel = Panel(cfg, brain, run=run, stop=stop)
+        if not panel.start():
+            panel = None
+    UI["panel"] = panel
+
+    def on_event(kind: str, data: dict) -> None:
+        if panel:
+            panel.on_event(kind, data)
+        if hud:
+            if kind == "step":
+                hud.step(f"Шаг {data.get('n')}: {data.get('text', '')}")
+            elif kind in ("done", "cancelled"):
+                hud.step(None)
+
+    brain.on_event = on_event
+    if hud:
+        hud.on_stop = stop
+        hud.on_open = panel.open if panel else None
+    if panel and cfg.panel_open_on_start:
+        panel.open()
+    return panel
 
 
 def run_voice(cfg) -> None:
@@ -73,20 +106,29 @@ def run_voice(cfg) -> None:
         with speak_lock:
             print(f"{cfg.assistant_name}: {text}")
             hud.jarvis(text)
-            hud.state("speak")
+            set_state("speak")
+            if UI["panel"]:
+                UI["panel"].log("jarvis", text)
             # Пока говорим, микрофон ловит только стоп-слова — чтобы можно было перебить
             # и чтобы не распознавать собственный голос как команду.
             try:
                 with listener.mode("barge"):
                     speaker.say(text)
             finally:
-                hud.state(idle["state"])
+                set_state(idle["state"])
+
+    def set_state(name: str) -> None:
+        hud.state(name)
+        if UI["panel"]:
+            UI["panel"].state = name
 
     def notify(text: str) -> None:
         """Напоминания: говорим, даже если перед этим Джарвиса перебили."""
         with speak_lock:
             print(f"{cfg.assistant_name}: {text}")
             hud.jarvis(text)
+            if UI["panel"]:
+                UI["panel"].log("jarvis", text)
             with listener.mode("barge"):
                 speaker.say(text)
 
@@ -112,6 +154,16 @@ def run_voice(cfg) -> None:
         state["interrupted_at"] = time.time()
 
     listener.on_interrupt = on_interrupt
+    run_lock = threading.Lock()  # команды с пульта и голосом — по очереди
+
+    def run_from_panel(command: str) -> None:
+        brain.clear_interrupt()
+        try:
+            run(command)
+        except SystemExit:
+            say("Выключаюсь только голосом.")
+
+    _attach_ui(cfg, brain, run=run_from_panel, stop=lambda: on_interrupt("кнопка"), hud=hud)
     listener.start()
     print(f"Скажите «{cfg.assistant_name}» и вашу просьбу (или «слушай» — слушать без имени). Ctrl+C — выход.")
     problem = brain.check()
@@ -120,6 +172,9 @@ def run_voice(cfg) -> None:
         say("Внимание: не могу достучаться до нейросети. Подробности в консоли.")
     else:
         say(f"{cfg.assistant_name} на связи, бля. Чё делаем?" if cfg.swearing else f"{cfg.assistant_name} на связи.")
+    morning = brain.morning()
+    if morning:
+        say(morning)
 
     on_phrases = {_norm(p) for p in cfg.listen_on_phrases}
     off_phrases = {_norm(p) for p in cfg.listen_off_phrases}
@@ -130,8 +185,12 @@ def run_voice(cfg) -> None:
         say(LISTEN_ON)
 
     def run(command: str) -> None:
+        with run_lock:
+            _run(command)
+
+    def _run(command: str) -> None:
         # Пока выполняем, тоже можно перебить «стопом».
-        hud.state("think")
+        set_state("think")
         prev = idle["state"]
         idle["state"] = "think"  # если по ходу заговорит — потом вернёмся в «думаю»
         try:
@@ -148,7 +207,7 @@ def run_voice(cfg) -> None:
             say("Что-то пошло не так. Подробности в консоли.")
         finally:
             idle["state"] = "game" if brain.game_mode else ("listen" if always else prev if prev != "think" else "wake")
-            hud.state(idle["state"])
+            set_state(idle["state"])
 
     try:
         while True:
@@ -167,7 +226,12 @@ def run_voice(cfg) -> None:
             in_follow_up = now < follow_until
             plain = _norm(heard)
             addressed = wake_cmd is not None or always or just_interrupted or in_follow_up or plain in on_phrases
+            if brain.recorder.active and wake_cmd is None and not STOP_SUMMARY_RE.match(plain):
+                addressed = False  # во время конспекта без имени — это разговор, а не команда
             if not addressed:
+                if brain.recorder.active:  # идёт конспект — всё сказанное не нам пишем в него
+                    better = whisper.transcribe(listener.last_audio) if whisper and whisper.ready else None
+                    brain.note_heard(better or heard)
                 continue
             brain.clear_interrupt()  # новая фраза к нам — снова можно говорить
 
@@ -189,6 +253,8 @@ def run_voice(cfg) -> None:
             command = command.strip(" ,.!?")
             print(f"Вы: {text}")
             hud.user(text)
+            if UI["panel"]:
+                UI["panel"].log("you", text)
             low = _norm(command) or plain
 
             if low in on_phrases:
@@ -226,6 +292,8 @@ def run_voice(cfg) -> None:
         pass
     finally:
         listener.stop()
+        if UI["panel"]:
+            UI["panel"].stop()
         print("Запоминаю, что узнал за сессию...")
         brain.shutdown()
 
@@ -252,6 +320,13 @@ def _handle_local(command: str, brain, say) -> bool:
         brain.reset()
         say("Начинаем с чистого листа.")
         return True
+    if PANEL_RE.match(low):
+        if UI["panel"]:
+            UI["panel"].open()
+            say("Открываю пульт.")
+        else:
+            say("Пульт выключен: поставь panel: true в config.yaml.")
+        return True
     if REPEAT_RE.match(low) and LAST_SAID["text"]:
         say(LAST_SAID["text"])
         return True
@@ -272,6 +347,8 @@ def run_text(cfg) -> None:
 
     def say(text: str) -> None:
         print(f"{cfg.assistant_name}: {text}")
+        if UI["panel"]:
+            UI["panel"].log("jarvis", text)
 
     def confirm(question: str) -> bool:
         return is_yes(input(f"{cfg.assistant_name}: {question} [да/нет] > "))
@@ -283,19 +360,45 @@ def run_text(cfg) -> None:
         print(f"\n{cfg.assistant_name}: {text}\nВы: ", end="", flush=True)
 
     brain = Brain(cfg, say=say, confirm=confirm, notify=notify)
+    run_lock = threading.Lock()
+
+    def run(text: str) -> None:
+        with run_lock:
+            if UI["panel"]:
+                UI["panel"].state = "think"
+            try:
+                if not _handle_local(text, brain, say):
+                    brain.handle(text)
+            finally:
+                if UI["panel"]:
+                    UI["panel"].state = "wake"
+
+    def run_from_panel(text: str) -> None:
+        try:
+            run(text)
+        except SystemExit:
+            say("Из пульта не выключаюсь — напиши в консоли.")
+
+    _attach_ui(cfg, brain, run=run_from_panel, stop=brain.interrupt)
     problem = brain.check()
     if problem:
         print(f"[!] {problem}")
+    morning = brain.morning()
+    if morning:
+        say(morning)
     print("Текстовый режим. Пиши просьбы, пустая строка или Ctrl+C — выход.")
     try:
         while True:
             text = input("Вы: ").strip()
             if not text:
                 break
-            if not _handle_local(text, brain, say):
-                brain.handle(text)
+            if UI["panel"]:
+                UI["panel"].log("you", text)
+            run(text)
     except (KeyboardInterrupt, EOFError, SystemExit):
         pass
+    if UI["panel"]:
+        UI["panel"].stop()
     print("Запоминаю, что узнал за сессию...")
     brain.shutdown()
 
