@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import hmac
 import json
+import secrets
 import threading
 import time
 import uuid
@@ -86,6 +88,9 @@ class Panel:
         self.agent = {"active": False, "request": "", "steps": [], "status": "idle"}
         self.state = "wake"
         self.server: ThreadingHTTPServer | None = None
+        # Ключ сессии: API отвечает только странице, которую отдали мы. Чужой сайт его не прочитает
+        # (same-origin policy), а без него ни прочитать, ни отправить ничего нельзя.
+        self.token = secrets.token_urlsafe(24)
 
     @property
     def url(self) -> str:
@@ -191,13 +196,17 @@ class Panel:
             def log_message(self, *args):  # не засоряем консоль
                 pass
 
-            def _host_ok(self) -> bool:
-                # Защита от DNS rebinding и чужих сайтов: только наш адрес и только JSON с нашей страницы.
+            def _host_ok(self, api: bool = True) -> bool:
+                # Защита от DNS rebinding и чужих сайтов: только наш адрес, наша страница и ключ сессии.
                 host = self.headers.get("Host", "")
                 if host not in (f"127.0.0.1:{panel.port}", f"localhost:{panel.port}"):
                     return False
                 origin = self.headers.get("Origin")
-                return origin in (None, f"http://{host}")
+                if origin not in (None, f"http://{host}"):
+                    return False
+                if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+                    return False
+                return not api or hmac.compare_digest(self.headers.get("X-Jarvis-Token", ""), panel.token)
 
             def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8") -> None:
                 self.send_response(code)
@@ -205,6 +214,11 @@ class Panel:
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; "
+                                 "style-src 'unsafe-inline'; connect-src 'self'; img-src data:; frame-ancestors 'none'; "
+                                 "base-uri 'none'; form-action 'none'")
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -212,11 +226,13 @@ class Panel:
                 self._send(code, json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
             def do_GET(self):
-                if not self._host_ok():
-                    return self._send(403, b"forbidden", "text/plain")
                 url = urlparse(self.path)
-                if url.path in ("/", "/index.html"):
-                    return self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                page = url.path in ("/", "/index.html")
+                if not self._host_ok(api=not page):
+                    return self._send(403, b"forbidden", "text/plain")
+                if page:
+                    html = PAGE.replace("__JARVIS_TOKEN__", panel.token)
+                    return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
                 if url.path == "/api/state":
                     since = int((parse_qs(url.query).get("since") or ["0"])[0] or 0)
                     return self._json(200, panel.snapshot(since))
@@ -227,7 +243,8 @@ class Panel:
                 self._send(404, b"not found", "text/plain")
 
             def do_POST(self):
-                if not self._host_ok() or "application/json" not in self.headers.get("Content-Type", ""):
+                ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                if not self._host_ok() or ctype != "application/json":
                     return self._send(403, b"forbidden", "text/plain")
                 try:
                     length = min(int(self.headers.get("Content-Length") or 0), 1 << 20)

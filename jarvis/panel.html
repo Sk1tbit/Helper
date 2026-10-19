@@ -114,8 +114,11 @@ let desks = [], templates = {}, widgetNames = {}, current = null, editing = fals
 let data = {}, chat = [], since = 0, agent = {steps: []}, jstate = "wake";
 try { current = localStorage.getItem("desk"); } catch (e) {}
 
+const TOKEN = "__JARVIS_TOKEN__";
+const get = path => fetch(path, {headers: {"X-Jarvis-Token": TOKEN}});
 async function api(path, body) {
-  const opt = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)};
+  const headers = {"X-Jarvis-Token": TOKEN};
+  const opt = body === undefined ? {headers} : {method: "POST", headers: {...headers, "Content-Type": "application/json"}, body: JSON.stringify(body)};
   const r = await fetch(path, opt);
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) { toast(j.error || "Ошибка " + r.status); throw new Error(j.error); }
@@ -249,10 +252,10 @@ $("#delDesk").onclick = () => {
 };
 document.querySelectorAll("[data-close]").forEach(b => b.onclick = () => b.closest(".modal").classList.remove("on"));
 
-async function load() { try { data = await (await fetch("/api/widgets")).json(); render(); } catch (e) {} }
+async function load() { try { data = await (await get("/api/widgets")).json(); render(); } catch (e) {} }
 async function poll() {
   try {
-    const s = await (await fetch("/api/state?since=" + since)).json();
+    const s = await (await get("/api/state?since=" + since)).json();
     let changed = false;
     if (s.chat.length) { chat.push(...s.chat); since = s.chat[s.chat.length - 1].n; changed = true; if (chat.length > 200) chat = chat.slice(-200); }
     if (JSON.stringify(s.agent) !== JSON.stringify(agent)) { agent = s.agent; changed = true; }
@@ -265,7 +268,7 @@ async function poll() {
   setTimeout(poll, 1000);
 }
 (async () => {
-  const j = await (await fetch("/api/desks")).json();
+  const j = await (await get("/api/desks")).json();
   desks = j.desks; templates = j.templates; widgetNames = j.widgets;
   if (!desks.some(d => d.id === current)) current = desks[0] && desks[0].id;
   await load(); poll();

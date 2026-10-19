@@ -133,7 +133,11 @@ def transcript(messages: list[dict], assistant_name: str) -> str:
                 args = json.dumps(call["arguments"], ensure_ascii=False)
                 lines.append(f"  [вызов {call['name']} {args[:300]}]")
         elif m["role"] == "tool":
-            lines.append(f"  [результат: {m['content'][:300]}]")
+            if m["content"].startswith("<untrusted_data"):
+                # Чужой текст (сайт, экран, файл) в разбор не отдаём: оттуда не учимся.
+                lines.append("  [результат: внешние данные, скрыто]")
+            else:
+                lines.append(f"  [результат: {m['content'][:300]}]")
     return "\n".join(lines)
 
 

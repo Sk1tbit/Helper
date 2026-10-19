@@ -1,4 +1,4 @@
-requests>=2.31
+requests>=2.32.4
 ddgs>=9.0
 vosk>=0.3.45
 sounddevice>=0.4.6
@@ -8,6 +8,6 @@ pygame>=2.5; sys_platform != "win32"
 pyautogui>=0.9.54
 pyperclip>=1.8
 mss>=9.0
-Pillow>=10.0
+Pillow>=10.3
 psutil>=5.9
 pygetwindow>=0.0.9; sys_platform == "win32"

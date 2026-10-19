@@ -171,6 +171,7 @@ class MCPHub:
         self.servers = [MCPServer(n, c, e) for n, c, e in specs]
         self.tools: list[dict] = []          # в формате TOOLS (name, description, input_schema)
         self._route: dict[str, tuple[MCPServer, str]] = {}
+        self._readonly: set[str] = set()   # инструменты, которые сами говорят, что только читают
         self.ready = threading.Event()
 
     def start(self, on_ready=None) -> None:
@@ -184,6 +185,8 @@ class MCPHub:
                 for t in server.tools:
                     full = f"mcp_{_safe(server.name)}_{_safe(t['name'])}"[:64]
                     self._route[full] = (server, t["name"])
+                    if (t.get("annotations") or {}).get("readOnlyHint") is True:
+                        self._readonly.add(full)
                     self.tools.append({
                         "name": full,
                         "description": f"[{server.name}] {t.get('description', '')}".strip()[:1000],
@@ -197,6 +200,9 @@ class MCPHub:
 
     def has(self, name: str) -> bool:
         return name in self._route
+
+    def read_only(self, name: str) -> bool:
+        return name in self._readonly
 
     def call(self, name: str, args: dict) -> str:
         server, tool = self._route[name]

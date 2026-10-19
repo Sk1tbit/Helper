@@ -80,6 +80,7 @@ class Config:
     # MCP — внешние инструменты (как в Claude Desktop)
     mcp_servers: list = field(default_factory=list)
     mcp_config: str = ""                 # путь к mcp.json формата Claude Desktop
+    mcp_confirm: bool = True             # спрашивать «да» перед MCP-инструментами, которые не только читают
     # Умный дом (Home Assistant)
     ha_url: str = ""
     ha_token: str = ""

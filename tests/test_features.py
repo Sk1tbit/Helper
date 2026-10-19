@@ -14,9 +14,11 @@ from conftest import openai_reply
 from jarvis.config import Config
 
 
-def _http():
+def _http(panel=None):
     s = requests.Session()
     s.trust_env = False  # мимо прокси
+    if panel is not None:
+        s.headers["X-Jarvis-Token"] = panel.token
     return s
 
 
@@ -169,7 +171,7 @@ def panel(make_brain):
 
 
 def test_panel_page_and_state(panel):
-    s = _http()
+    s = _http(panel)
     page = s.get(panel.url)
     assert page.status_code == 200 and "Пульт" in page.text
     panel.log("jarvis", "привет")
@@ -184,7 +186,7 @@ def test_panel_crud(panel, monkeypatch):
     import jarvis.rates as R
     monkeypatch.setattr(R, "weather_data", lambda c: None)
     monkeypatch.setattr(R, "rates", lambda: None)
-    s = _http()
+    s = _http(panel)
     post = lambda path, body: s.post(panel.url + path, json=body).json()
     assert post("api/task", {"text": "купить корм"})["ok"]
     tid = s.get(panel.url + "api/widgets").json()["tasks"][0]["id"]
@@ -205,7 +207,7 @@ def test_panel_crud(panel, monkeypatch):
 
 
 def test_panel_say_and_stop(panel):
-    s = _http()
+    s = _http(panel)
     assert s.post(panel.url + "api/say", json={"text": "как дела"}).json()["ok"]
     for _ in range(50):
         if panel.said:
@@ -217,7 +219,7 @@ def test_panel_say_and_stop(panel):
 
 
 def test_panel_desks_saved(panel):
-    s = _http()
+    s = _http(panel)
     d = s.get(panel.url + "api/desks").json()
     assert "Утро" in d["templates"] and d["desks"][0]["name"] == "Главный"
     new = [{"id": "x", "name": "Игры", "widgets": ["fishing", "bogus", "system"]}]
@@ -227,13 +229,35 @@ def test_panel_desks_saved(panel):
 
 
 def test_panel_rejects_foreign_sites(panel):
-    s = _http()
+    s = _http(panel)
     # чужой сайт через DNS rebinding — другой Host
     assert s.get(panel.url + "api/state", headers={"Host": "evil.com"}).status_code == 403
     # чужая страница шлёт форму без JSON или с чужим Origin
     assert s.post(panel.url + "api/say", data="text=rm", headers={"Content-Type": "text/plain"}).status_code == 403
     assert s.post(panel.url + "api/say", json={"text": "x"}, headers={"Origin": "http://evil.com"}).status_code == 403
     assert panel.ran == []
+
+
+def test_panel_requires_token(panel):
+    s = _http()
+    page = s.get(panel.url)
+    assert page.status_code == 200 and panel.token in page.text  # ключ получает только наша страница
+    assert "frame-ancestors 'none'" in page.headers["Content-Security-Policy"]
+    assert s.get(panel.url + "api/state").status_code == 403
+    assert s.get(panel.url + "api/widgets", headers={"X-Jarvis-Token": "wrong"}).status_code == 403
+    assert s.post(panel.url + "api/say", json={"text": "x"}).status_code == 403
+    # «text/plain; x=application/json» — простой запрос без preflight, не пропускаем
+    assert s.post(panel.url + "api/say", data='{"text":"x"}', headers={
+        "X-Jarvis-Token": panel.token, "Content-Type": "text/plain; x=application/json"}).status_code == 403
+    assert s.get(panel.url + "api/state", headers={"X-Jarvis-Token": panel.token,
+                                                    "Sec-Fetch-Site": "cross-site"}).status_code == 403
+    assert panel.ran == []
+
+
+def test_panel_escapes_html(panel):
+    # Весь текст в панели вставляется через textContent — никакого innerHTML.
+    from jarvis.panel import PAGE
+    assert "innerHTML" not in PAGE and "insertAdjacentHTML" not in PAGE and "eval(" not in PAGE
 
 
 # --- MCP ------------------------------------------------------------------------------------
@@ -308,7 +332,8 @@ def test_brain_routes_mcp_tools(tmp_path, make_brain):
         assert any(t["name"] == "mcp_srv_echo" for t in brain.tools)
         brain.handle("повтори через сервер раз")
         tool_msg = [m for m in brain.messages if m["role"] == "tool"][0]
-        assert tool_msg["content"] == "эхо: раз" and said == ["Сервер сказал эхо."]
+        assert "\nэхо: раз\n" in tool_msg["content"] and tool_msg["content"].startswith("<untrusted_data")
+        assert said == ["Сервер сказал эхо."]
         sent = server.requests[0][2]["tools"]
         assert any(t["function"]["name"] == "mcp_srv_echo" for t in sent)
     finally:

@@ -18,7 +18,7 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 SYSTEM = platform.system()  # "Windows" / "Darwin" / "Linux"
 SCREENSHOT_MAX_WIDTH = 1366
@@ -106,6 +106,88 @@ def _stem(text: str) -> str:
     """Грубо отрезает окончания, чтобы «яндекс музыку» совпало с «яндекс музыка»."""
     words = re.sub(r"[^\w]+", " ", text.lower().replace("ё", "е")).split()
     return " ".join(re.sub(r"[аяуюеиыйоь]+$", "", w) if len(w) > 4 else w for w in words)
+
+
+# --- безопасность ------------------------------------------------------------------
+# Ссылки приходят не только от пользователя, но и из выдачи поиска, постов и MCP. На Windows
+# webbrowser.open/os.startfile открывают ЛЮБОЙ протокол (ms-msdt:, search-ms:, file://…exe) —
+# через такие ссылки делали реальные атаки. Поэтому — только белый список.
+WEB_SCHEMES = ("http", "https")
+APP_SCHEMES = ("steam", "tg", "discord", "spotify", "ms-settings", "mailto", "yandexmusic", "zoommtg", "roblox",
+               "com.epicgames.launcher", "obsidian", "vk")
+# Файлы, которые при открытии что-то выполняют. Если такой файл лежит не среди установленных
+# программ (например, в «Загрузках» или на сетевой шаре) — запускаем только после «да».
+RISKY_EXT = {".exe", ".bat", ".cmd", ".com", ".ps1", ".psm1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msi",
+             ".msp", ".scr", ".hta", ".cpl", ".jar", ".lnk", ".url", ".appref-ms", ".reg", ".pif", ".application",
+             ".iso", ".img", ".vhd", ".vhdx", ".xll", ".msc", ".library-ms", ".settingcontent-ms", ".search-ms"}
+SHELL_WINDOW_RE = re.compile(r"powershell|командная строка|command prompt|cmd\.exe|терминал|terminal|^выполнить$|^run$|"
+                             r"\bbash\b|\bwsl\b|администратор:|administrator:", re.I)
+COMMANDISH_RE = re.compile(
+    r"(powershell|pwsh|cmd(\.exe)?\s*/[ck]|\biex\b|invoke-|\biwr\b|\birm\b|\bcurl\b|\bwget\b|certutil|bitsadmin|"
+    r"mshta|rundll32|regsvr32|\breg\s+(add|delete)|schtasks|\bdel\s+/|\brm\s+-|\bformat\s+[a-z]:|\bsc\s+(create|config)|"
+    r"net\s+(user|localgroup)|start-process|-enc(odedcommand)?\b|set-executionpolicy|add-mppreference|https?://)", re.I)
+
+
+def scheme_of(url: str) -> str:
+    m = re.match(r"^([a-z][\w+.-]*):", url.strip(), re.I)
+    if not m or re.match(r"^[a-z]:[\\/]", url.strip(), re.I):  # C:\... — это путь, а не протокол
+        return ""
+    return m.group(1).lower()
+
+
+def safe_open(url: str, allowed: tuple[str, ...] = WEB_SCHEMES) -> None:
+    """Открывает ссылку, только если её протокол в белом списке."""
+    scheme = scheme_of(url)
+    if scheme not in allowed:
+        raise ToolError(f"Не открываю ссылки вида «{scheme or url[:20]}:» — так открывают вредоносные программы. "
+                        f"Можно только {', '.join(allowed)}.")
+    webbrowser.open(url)
+
+
+def _trusted_dirs() -> list[Path]:
+    env = os.environ.get
+    dirs = [env("ProgramFiles"), env("ProgramFiles(x86)"), env("ProgramW6432"), env("SystemRoot") or env("WINDIR"),
+            env("LOCALAPPDATA") and os.path.join(env("LOCALAPPDATA"), "Programs"),
+            env("APPDATA") and os.path.join(env("APPDATA"), "Microsoft", "Windows", "Start Menu"),
+            env("PROGRAMDATA") and os.path.join(env("PROGRAMDATA"), "Microsoft", "Windows", "Start Menu"),
+            env("LOCALAPPDATA") and os.path.join(env("LOCALAPPDATA"), "Yandex"),
+            env("LOCALAPPDATA") and os.path.join(env("LOCALAPPDATA"), "Discord")]
+    return [Path(d).resolve() for d in dirs if d]
+
+
+def risky_target(target: str) -> str | None:
+    """Что именно опасно в запуске target (или None, если это обычная программа/папка/документ)."""
+    t = os.path.expandvars(target.strip().strip('"'))
+    if t.startswith(("\\\\", "//")):
+        return f"файл с сетевого ресурса {t}"
+    scheme = scheme_of(t)
+    if scheme:
+        return None if scheme in WEB_SCHEMES + APP_SCHEMES else f"ссылку с протоколом {scheme}:"
+    path = Path(t)
+    try:
+        if not path.is_file():
+            return None  # папка или просто название программы — его ищем в меню «Пуск»
+        real = path.resolve()
+    except OSError:
+        return None
+    if real.suffix.lower() not in RISKY_EXT:
+        return None
+    for d in _trusted_dirs():
+        if real == d or d in real.parents:
+            return None
+    return f"файл {real.name} из {real.parent}"
+
+
+def _active_window_title() -> str:
+    if SYSTEM != "Windows":
+        return ""
+    try:
+        import pygetwindow
+
+        win = pygetwindow.getActiveWindow()
+        return (win.title if win else "") or ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _web_app(name: str) -> str | None:
@@ -486,6 +568,12 @@ class ToolBox:
     def tool_open_app(self, name: str) -> str:
         name = name.strip()
         target = APP_ALIASES.get(SYSTEM, {}).get(name.lower(), name)
+        scheme = scheme_of(target)
+        if scheme and scheme not in WEB_SCHEMES + APP_SCHEMES:
+            raise ToolError(f"Не открываю протокол «{scheme}:» — так открывают вредоносные программы.")
+        risk = risky_target(target)
+        if risk:
+            self._ask(f"Запустить {risk}? Это не установленная программа.")
         if target.startswith(("http://", "https://")):
             webbrowser.open(target)
         elif SYSTEM == "Windows":
@@ -501,7 +589,7 @@ class ToolBox:
             if not launched:
                 url = _web_app(name)
                 if url:
-                    webbrowser.open(url)
+                    safe_open(url)
                     return f"Программы «{name}» на компьютере нет, открыл сайт {url} в браузере"
                 similar = ", ".join(apps.suggestions(name)) or "ничего похожего"
                 raise ToolError(f"Программа «{name}» не найдена. Похожие в меню Пуск: {similar}. "
@@ -509,7 +597,7 @@ class ToolBox:
             return f"Запущено: {launched}"
         elif _web_app(name) and not Path(target).expanduser().exists():
             url = _web_app(name)
-            webbrowser.open(url)
+            safe_open(url)
             return f"Открыл сайт {url} в браузере"
         elif SYSTEM == "Darwin":
             path = Path(target).expanduser()
@@ -519,13 +607,22 @@ class ToolBox:
             if path.exists():
                 subprocess.Popen(["xdg-open", str(path)])
             else:
-                subprocess.Popen(target, shell=True, start_new_session=True)
+                import shlex
+                import shutil
+
+                argv = shlex.split(target)  # без shell: «название; rm -rf ~» не выполнит вторую команду
+                if not argv or not shutil.which(argv[0]):
+                    raise ToolError(f"Программа «{name}» не найдена")
+                subprocess.Popen(argv, start_new_session=True)
         return f"Запущено: {target}"
 
     def tool_open_url(self, url: str) -> str:
-        if "://" not in url:
-            url = "https://" + url
-        webbrowser.open(url)
+        url = url.strip()
+        if url.startswith(("\\\\", "//")):
+            raise ToolError("Сетевые пути не открываю — так подсовывают вредоносные файлы.")
+        if not scheme_of(url) or re.match(r"^[\w.-]+:\d+([/?#]|$)", url):
+            url = "https://" + url  # «youtube.com», «localhost:8080»
+        safe_open(url, WEB_SCHEMES + APP_SCHEMES)
         return f"Открыто: {url}"
 
     def tool_browser_search(self, query: str, engine: str = "google") -> str:
@@ -582,6 +679,13 @@ class ToolBox:
         import pyautogui
         import pyperclip
 
+        # Защита от «Win+R → напечатай команду → Enter» по указке чужого сайта или поста:
+        # ввод в консоль или команды, похожей на опасную, — только после «да».
+        title = _active_window_title()
+        if SHELL_WINDOW_RE.search(title.strip()):
+            self._ask(f"Ввести в «{title.strip()[:40]}»: {text[:80]}?")
+        elif press_enter and COMMANDISH_RE.search(text):
+            self._ask(f"Ввести и отправить: {text[:80]}?")
         # pyautogui.write() не умеет кириллицу, поэтому вставляем через буфер.
         old = _safe_paste(pyperclip)
         pyperclip.copy(text)
@@ -598,6 +702,11 @@ class ToolBox:
         import pyautogui
 
         keys = [_normalize_key(k) for k in keys]
+        low = {k.lower() for k in keys}
+        if low & {"win", "winleft", "winright", "command"} and low & {"r", "x"}:
+            self._ask("Открыть окно «Выполнить» / меню администратора (Win+R / Win+X)?")
+        elif low & {"enter", "return"} and SHELL_WINDOW_RE.search(_active_window_title().strip()):
+            self._ask("Нажать Enter в консоли — выполнить то, что там набрано?")
         if len(keys) == 1:
             pyautogui.press(keys[0])
         else:
@@ -639,7 +748,7 @@ class ToolBox:
                 url = tg_app_link(url)
             elif "discord.com/channels/" in url and self.discord_open_mode == "app":
                 url = url.replace("https://discord.com/", "discord://discord.com/", 1)
-            webbrowser.open(url)
+            safe_open(url, WEB_SCHEMES + ("tg", "discord"))  # ссылка из чужого поста — только веб и наши
             report += f"\nОткрыл в браузере: {hits[0].url}"
         return report
 
@@ -693,6 +802,12 @@ class ToolBox:
                 return "\n".join(f"- {d['name']}: {d['state']}" for d in self.home.devices()) or "Устройств нет"
             if not name:
                 raise ToolError("Какое устройство?")
+            device = self.home.find(name)
+            # Замки, ворота и гаражные двери — только после «да»: их может «попросить» и чужой текст.
+            entry = device and (device["domain"] == "lock" or device["domain"] == "cover" and re.search(
+                r"гараж|ворот|garage|gate|двер|door", device["name"], re.I))
+            if entry:
+                self._ask(f"{device['name']}: точно {'открыть' if action != 'off' else 'закрыть'}?")
             return self.home.act(action, name)
         except HomeError as e:
             raise ToolError(str(e)) from e

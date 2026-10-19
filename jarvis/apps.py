@@ -173,7 +173,12 @@ def launch_windows(name: str) -> str | None:
     target = os.path.expandvars(name.strip().strip('"'))
 
     # Ссылки, протоколы и существующие пути — открываем как есть.
-    if re.match(r"^[a-z][\w+.-]*:(?!\\)", target, re.I) or Path(target).exists():
+    from .tools import APP_SCHEMES, WEB_SCHEMES, scheme_of
+
+    scheme = scheme_of(target)
+    if scheme and scheme not in WEB_SCHEMES + APP_SCHEMES:
+        return None  # ms-msdt:, search-ms: и прочее опасное не открываем вовсе
+    if scheme or Path(target).exists():
         os.startfile(target)  # type: ignore[attr-defined]
         return target
 
