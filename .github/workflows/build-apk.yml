@@ -1,0 +1,35 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+      - name: Add Android platform
+        run: npx cap add android
+      - name: Make the app fullscreen-friendly and dark
+        run: |
+          STYLES=android/app/src/main/res/values/styles.xml
+          sed -i 's#<item name="android:background">@null</item>#<item name="android:background">@null</item>\n        <item name="android:windowBackground">@android:color/black</item>\n        <item name="android:statusBarColor">\#0b0b0d</item>\n        <item name="android:navigationBarColor">\#0b0b0d</item>#' "$STYLES" || true
+      - name: Sync web assets
+        run: npx cap sync android
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BlackPaint-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk

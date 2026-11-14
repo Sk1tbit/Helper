@@ -1,0 +1,15 @@
+{
+  "name": "black-paint",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Black Paint: чёрный Paint с бесконечным холстом, слоями и меню холстов",
+  "dependencies": {
+    "@capacitor/android": "^6.1.2",
+    "@capacitor/core": "^6.1.2",
+    "@capacitor/filesystem": "^6.0.1",
+    "@capacitor/share": "^6.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.1.2"
+  }
+}

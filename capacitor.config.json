@@ -1,0 +1,7 @@
+{
+  "appId": "com.skitbit.blackpaint",
+  "appName": "Black Paint",
+  "webDir": "www",
+  "backgroundColor": "#0b0b0d",
+  "android": { "backgroundColor": "#0b0b0d" }
+}
